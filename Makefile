@@ -17,9 +17,12 @@ endif
 SIM_BUILD_DIR = sim_build
 SIM_VVP = $(SIM_BUILD_DIR)/sim.vvp
 
-# Force bash shell on Windows so ! negation and Unix commands work
-SHELL = C:/Program Files/Git/bin/sh.exe
-.SHELLFLAGS = -c
+# Force bash shell on Windows so ! negation and Unix commands work.
+# Guarded: setting SHELL unconditionally breaks make on Linux.
+ifeq ($(OS),Windows_NT)
+  SHELL = C:/Program Files/Git/bin/sh.exe
+  .SHELLFLAGS = -c
+endif
 
 # Environment variables
 export COCOTB_REDUCED_LOG_FMT=1

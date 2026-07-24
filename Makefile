@@ -403,3 +403,22 @@ test_tpu_nxn_ic_train_n4: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_IC_N=4 MODULE=test_tpu_nxn_ic_train_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv tpu_nxn_ic.vcd waveforms/tpu_nxn_ic_train_n4.vcd 2>/dev/null || true
+
+# Instruction sequencer leaf test at N=4 (item 9b; agent-authored RTL,
+# harness-authored gate test). NOTE: src/instr_seq_nxn.sv and
+# src/tpu_nxn_prog.sv are deliberately NOT in the SOURCES list until the
+# loop lands them — the loop compiles all of src/*.sv via its
+# command-line SOURCES override.
+test_instr_seq_nxn_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s instr_seq_nxn -s dump -g2012 -Pinstr_seq_nxn.SYSTOLIC_ARRAY_WIDTH=4 $(SOURCES) test/dump_instr_seq_nxn.sv
+	PYTHONOPTIMIZE=$(NOASSERT) INSTR_SEQ_N=4 MODULE=test_instr_seq_nxn $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv instr_seq_nxn.vcd waveforms/instr_seq_nxn_n4.vcd 2>/dev/null || true
+
+# Program-driven full-chip training replay at N=4 (item 9b): the 8b
+# instruction stream loaded into the sequencer and replayed under `run`.
+test_tpu_nxn_prog_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=4 $(SOURCES) test/dump_tpu_nxn_prog.sv
+	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=4 MODULE=test_tpu_nxn_prog_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_n4.vcd 2>/dev/null || true

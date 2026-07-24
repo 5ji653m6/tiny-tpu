@@ -101,7 +101,14 @@ module systolic #(
         .rst(rst),
         .pe_enabled(pe_enabled[0]),
 
-        .pe_valid_in(sys_start_2),
+        // BUG-SYS-1 fix: take valid from pe11 (down column 1), not sys_start_2.
+        // sys_start_2 only fires when the UB streams a 2nd input-matrix column,
+        // so single-column inputs (e.g. the 4x1 dL/dZ backward pass) never
+        // raised sys_valid_out_21 -> vpu_valid_out_1 and test_tpu hung. When
+        // row 2 does stream, the UB staggers it exactly 1 cycle behind row 1,
+        // so pe_valid_out_11 is cycle-identical to sys_start_2 (verified vs
+        // unified_buffer.sv read FSM for both transpose directions).
+        .pe_valid_in(pe_valid_out_11),
         .pe_valid_out(sys_valid_out_21),
 
         .pe_accept_w_in(sys_accept_w_1),

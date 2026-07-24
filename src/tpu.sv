@@ -23,7 +23,20 @@ module tpu #(
     input logic [15:0] learning_rate_in,
 
     // VPU data pathway
-    input logic [3:0] vpu_data_pathway,
+    //
+    // 7-bit per-stage enable vector (1 = stage enabled, 0 = bypassed):
+    //   bit 6: sm    (softmax)
+    //   bit 5: ln    (layernorm)
+    //   bit 4: gelu
+    //   bit 3: bias
+    //   bit 2: lr    (leaky relu)
+    //   bit 1: loss
+    //   bit 0: lr_d  (leaky relu derivative)
+    //
+    // Legacy 4-bit testbench drives (0b0000 bypass, 0b1100 forward,
+    // 0b1111 transition, 0b0001 backward) zero-extend into bits [3:0]
+    // with the new stages (gelu/ln/sm) bypassed and MUST keep working.
+    input logic [6:0] vpu_data_pathway,
 
     input logic sys_switch_in,
     input logic [15:0] vpu_leak_factor_in,
@@ -158,7 +171,7 @@ module tpu #(
         .clk(clk),
         .rst(rst),
 
-        .vpu_data_pathway(vpu_data_pathway), // 4-bits to signify which modules to route the inputs to (1 bit for each module)
+        .vpu_data_pathway(vpu_data_pathway), // 7-bits to signify which VPU stages to route the inputs through (1 bit per stage, 0 = bypass; see port declaration for encoding)
 
         // Inputs from systolic array
         .vpu_data_in_1(sys_data_out_21),

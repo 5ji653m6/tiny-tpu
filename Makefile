@@ -351,3 +351,9 @@ test_tpu_nxn_n4: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_N=4 MODULE=test_tpu_nxn_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv tpu_nxn.vcd waveforms/tpu_nxn_n4.vcd 2>/dev/null || true
+
+test_tpu_nxn_train_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=4 $(SOURCES) test/dump_tpu_nxn.sv
+	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_N=4 MODULE=test_tpu_nxn_train_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv tpu_nxn.vcd waveforms/tpu_nxn_train_n4.vcd 2>/dev/null || true

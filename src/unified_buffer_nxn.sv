@@ -124,6 +124,33 @@ module unified_buffer_nxn #(
     logic [15:0]        rd_grad_weight_ptr_next;
     logic [15:0]        grad_descent_ptr_next;
 
+    // Generalized shared-pointer walk helpers (valid for ANY column count C = 1..N,
+    // not just C=2; bit-identical to the legacy +1 walks at C=2 / R'=2).
+    // Descending walks (input-untransposed, Y, H, grad_weight): lane i streams column i
+    // top-row-first, so the within-cycle step between consecutive reading lanes is C-1.
+    // End-of-cycle correction: C - (C-1)*di - (C-1), di = min(C-1, t+1) - max(0, t-R+1).
+    function automatic int descending_walk_correction(input int C, input int R, input int t);
+        int di;
+        begin
+            di = ((C-1 < t+1) ? C-1 : t+1) - ((t-R+1 > 0) ? t-R+1 : 0);
+            descending_walk_correction = C - (C-1)*di - (C-1);
+        end
+    endfunction
+
+    // Ascending walk (input-transposed): lane i streams row i first-element-first, so the
+    // within-cycle step between consecutive reading lanes is R'-1 (latched row size).
+    // End-of-cycle correction: 1 + (R'-1)*(i_min_next - i_max - 1) with
+    // i_min_next = max(0, t+2-R'), i_max = min(C'-1, t).
+    function automatic int ascending_walk_correction(input int Rp, input int Cp, input int t);
+        int i_min_next;
+        int i_max;
+        begin
+            i_min_next = (t+2-Rp > 0) ? t+2-Rp : 0;
+            i_max = (Cp-1 < t) ? Cp-1 : t;
+            ascending_walk_correction = 1 + (Rp-1)*(i_min_next - i_max - 1);
+        end
+    endfunction
+
     genvar i;
     generate
         for (i=0; i<SYSTOLIC_ARRAY_WIDTH; i++) begin : gradient_descent_gen
@@ -274,24 +301,26 @@ module unified_buffer_nxn #(
                         if(rd_input_time_counter >= i && rd_input_time_counter < rd_input_row_size + i && i < rd_input_col_size) begin 
                             ub_rd_input_valid_out[i] <= 1'b1;
                             ub_rd_input_data_out[i] <= ub_memory[rd_input_ptr_next];
-                            rd_input_ptr_next = rd_input_ptr_next + 1;
+                            rd_input_ptr_next = rd_input_ptr_next + (rd_input_row_size - 1);
                         end else begin 
                             ub_rd_input_valid_out[i] <= 1'b0;
                             ub_rd_input_data_out[i] <= '0;
                         end
                     end
+                    rd_input_ptr_next = rd_input_ptr_next + ascending_walk_correction(rd_input_row_size, rd_input_col_size, rd_input_time_counter);
                 end else begin
                     // For untransposed matrices (for loop should decrement)
                     for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
                         if(rd_input_time_counter >= i && rd_input_time_counter < rd_input_row_size + i && i < rd_input_col_size) begin 
                             ub_rd_input_valid_out[i] <= 1'b1;
                             ub_rd_input_data_out[i] <= ub_memory[rd_input_ptr_next];
-                            rd_input_ptr_next = rd_input_ptr_next + 1;
+                            rd_input_ptr_next = rd_input_ptr_next + (rd_input_col_size - 1);
                         end else begin 
                             ub_rd_input_valid_out[i] <= 1'b0;
                             ub_rd_input_data_out[i] <= '0;
                         end
                     end
+                    rd_input_ptr_next = rd_input_ptr_next + descending_walk_correction(rd_input_col_size, rd_input_row_size, rd_input_time_counter);
                 end
                 rd_input_time_counter <= rd_input_time_counter + 1;
                 rd_input_ptr <= rd_input_ptr_next;
@@ -390,11 +419,12 @@ module unified_buffer_nxn #(
                 for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
                     if(rd_Y_time_counter >= i && rd_Y_time_counter < rd_Y_row_size + i && i < rd_Y_col_size) begin
                         ub_rd_Y_data_out[i] <= ub_memory[rd_Y_ptr_next];
-                        rd_Y_ptr_next = rd_Y_ptr_next + 1;
+                        rd_Y_ptr_next = rd_Y_ptr_next + (rd_Y_col_size - 1);
                     end else begin
                         ub_rd_Y_data_out[i] <= '0;
                     end
                 end
+                rd_Y_ptr_next = rd_Y_ptr_next + descending_walk_correction(rd_Y_col_size, rd_Y_row_size, rd_Y_time_counter);
                 rd_Y_time_counter <= rd_Y_time_counter + 1;
                 rd_Y_ptr <= rd_Y_ptr_next;
             end else begin
@@ -413,11 +443,12 @@ module unified_buffer_nxn #(
                 for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
                     if(rd_H_time_counter >= i && rd_H_time_counter < rd_H_row_size + i && i < rd_H_col_size) begin
                         ub_rd_H_data_out[i] <= ub_memory[rd_H_ptr_next];
-                        rd_H_ptr_next = rd_H_ptr_next + 1;
+                        rd_H_ptr_next = rd_H_ptr_next + (rd_H_col_size - 1);
                     end else begin
                         ub_rd_H_data_out[i] <= '0;
                     end
                 end
+                rd_H_ptr_next = rd_H_ptr_next + descending_walk_correction(rd_H_col_size, rd_H_row_size, rd_H_time_counter);
                 rd_H_time_counter <= rd_H_time_counter + 1;
                 rd_H_ptr <= rd_H_ptr_next;
             end else begin
@@ -445,11 +476,12 @@ module unified_buffer_nxn #(
                 for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
                     if(rd_grad_weight_time_counter >= i && rd_grad_weight_time_counter < rd_grad_weight_row_size + i && i < rd_grad_weight_col_size) begin 
                         value_old_in[i] <= ub_memory[rd_grad_weight_ptr_next];
-                        rd_grad_weight_ptr_next = rd_grad_weight_ptr_next + 1;
+                        rd_grad_weight_ptr_next = rd_grad_weight_ptr_next + (rd_grad_weight_col_size - 1);
                     end else begin 
                         value_old_in[i] <= '0;
                     end
                 end
+                rd_grad_weight_ptr_next = rd_grad_weight_ptr_next + descending_walk_correction(rd_grad_weight_col_size, rd_grad_weight_row_size, rd_grad_weight_time_counter);
                 rd_grad_weight_time_counter <= rd_grad_weight_time_counter + 1;
                 rd_grad_weight_ptr <= rd_grad_weight_ptr_next;
             end else begin

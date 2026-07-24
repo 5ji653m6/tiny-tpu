@@ -62,7 +62,9 @@ SOURCES = src/pe.sv \
 		  src/layernorm_group_nxn.sv \
 		  src/softmax_group_nxn.sv \
 		  src/control_unit_nxn.sv \
-		  src/tpu_nxn_ic.sv
+		  src/tpu_nxn_ic.sv \
+		  src/instr_seq_nxn.sv \
+		  src/tpu_nxn_prog.sv
 
 # MODIFY 1) variable next to -s 
 # MODIFY 2) variable next to $(SOURCES)
@@ -395,9 +397,7 @@ test_control_unit_nxn_n4: $(SIM_BUILD_DIR)
 	mv control_unit_nxn.vcd waveforms/control_unit_nxn_n4.vcd 2>/dev/null || true
 
 # Instruction-driven full-chip training replay at N=4 (item 8b;
-# agent-authored RTL, harness-authored gate test). NOTE: src/tpu_nxn_ic.sv
-# is deliberately NOT in the SOURCES list until the loop lands it — the
-# loop compiles all of src/*.sv via its command-line SOURCES override.
+# agent-authored RTL, harness-authored gate test).
 test_tpu_nxn_ic_train_n4: $(SIM_BUILD_DIR)
 	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=4 $(SOURCES) test/dump_tpu_nxn_ic.sv
 	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_IC_N=4 MODULE=test_tpu_nxn_ic_train_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
@@ -405,10 +405,7 @@ test_tpu_nxn_ic_train_n4: $(SIM_BUILD_DIR)
 	mv tpu_nxn_ic.vcd waveforms/tpu_nxn_ic_train_n4.vcd 2>/dev/null || true
 
 # Instruction sequencer leaf test at N=4 (item 9b; agent-authored RTL,
-# harness-authored gate test). NOTE: src/instr_seq_nxn.sv and
-# src/tpu_nxn_prog.sv are deliberately NOT in the SOURCES list until the
-# loop lands them — the loop compiles all of src/*.sv via its
-# command-line SOURCES override.
+# harness-authored gate test).
 test_instr_seq_nxn_n4: $(SIM_BUILD_DIR)
 	$(IVERILOG) -o $(SIM_VVP) -s instr_seq_nxn -s dump -g2012 -Pinstr_seq_nxn.SYSTOLIC_ARRAY_WIDTH=4 $(SOURCES) test/dump_instr_seq_nxn.sv
 	PYTHONOPTIMIZE=$(NOASSERT) INSTR_SEQ_N=4 MODULE=test_instr_seq_nxn $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)

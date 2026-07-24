@@ -132,6 +132,26 @@ module vpu (
     logic signed [15:0] sm_to_loss_data_in_2;
     logic sm_to_loss_valid_in_2;
 
+    // BUG-SKEW-1 fix: the systolic array delivers output column 1 one
+    // cycle ahead of column 2 (UB wavefront stagger), and the per-lane
+    // stages preserve that relative skew. Cross-lane group stages
+    // (layernorm, softmax) must instead pair the two columns OF THE SAME
+    // OUTPUT ROW — beats that arrive one cycle apart. Align lane 1 to
+    // lane 2 at each group stage's input (1-cycle delay), then re-apply
+    // the native skew at its output (delay lane 2 by 1 cycle) so
+    // downstream per-lane stages and VPU output timing are unchanged.
+    // Legacy pathways never enable these stages, so legacy timing and
+    // the module-level stage tests (which drive aligned valids) are
+    // unaffected.
+    logic signed [15:0] ln_data_1_in_al;
+    logic               ln_valid_1_in_al;
+    logic signed [15:0] ln_data_2_out_rs;
+    logic               ln_valid_2_out_rs;
+    logic signed [15:0] sm_data_1_in_al;
+    logic               sm_valid_1_in_al;
+    logic signed [15:0] sm_data_2_out_rs;
+    logic               sm_valid_2_out_rs;
+
     // loss
     logic signed [15:0] loss_data_1_in; 
     logic loss_valid_1_in;
@@ -233,9 +253,9 @@ module vpu (
         .clk(clk),
         .rst(rst),
 
-        .ln_data_1_in(ln_data_1_in),
+        .ln_data_1_in(ln_data_1_in_al),   // BUG-SKEW-1: aligned to lane 2
         .ln_data_2_in(ln_data_2_in),
-        .ln_valid_1_in(ln_valid_1_in),
+        .ln_valid_1_in(ln_valid_1_in_al), // BUG-SKEW-1: aligned to lane 2
         .ln_valid_2_in(ln_valid_2_in),
 
         .ln_data_1_out(ln_data_1_out),
@@ -250,9 +270,9 @@ module vpu (
         .clk(clk),
         .rst(rst),
 
-        .sm_data_1_in(sm_data_1_in),
+        .sm_data_1_in(sm_data_1_in_al),   // BUG-SKEW-1: aligned to lane 2
         .sm_data_2_in(sm_data_2_in),
-        .sm_valid_1_in(sm_valid_1_in),
+        .sm_valid_1_in(sm_valid_1_in_al), // BUG-SKEW-1: aligned to lane 2
         .sm_valid_2_in(sm_valid_2_in),
 
         .sm_data_1_out(sm_data_1_out),
@@ -463,9 +483,9 @@ module vpu (
 
                 // connect layernorm outputs to intermediate values
                 ln_to_loss_data_in_1 = ln_data_1_out;
-                ln_to_loss_data_in_2 = ln_data_2_out;
+                ln_to_loss_data_in_2 = ln_data_2_out_rs;   // BUG-SKEW-1: re-skewed
                 ln_to_loss_valid_in_1 = ln_valid_1_out;
-                ln_to_loss_valid_in_2 = ln_valid_2_out;
+                ln_to_loss_valid_in_2 = ln_valid_2_out_rs; // BUG-SKEW-1: re-skewed
             end else begin
                 // disable inputs
                 ln_data_1_in = 16'b0;
@@ -490,9 +510,9 @@ module vpu (
 
                 // connect softmax outputs to intermediate values
                 sm_to_loss_data_in_1 = sm_data_1_out;
-                sm_to_loss_data_in_2 = sm_data_2_out;
+                sm_to_loss_data_in_2 = sm_data_2_out_rs;   // BUG-SKEW-1: re-skewed
                 sm_to_loss_valid_in_1 = sm_valid_1_out;
-                sm_to_loss_valid_in_2 = sm_valid_2_out;
+                sm_to_loss_valid_in_2 = sm_valid_2_out_rs; // BUG-SKEW-1: re-skewed
             end else begin
                 // disable inputs
                 sm_data_1_in = 16'b0;
@@ -577,6 +597,35 @@ module vpu (
 
     // BUG-VPU-1 fix: register VPU outputs to prevent combinational glitches
     // BUG-VPU-2 fix: removed dual driver on last_H_data_*_in (was also driven by always_ff reset)
+    // BUG-SKEW-1 fix: 1-cycle shift registers implementing the lane
+    // alignment described at the declarations above. Free-running (no
+    // enable) so valid pulse trains are delayed exactly one cycle;
+    // when a group stage is bypassed these shift zeros and are unused.
+    always_ff @(posedge clk or posedge rst) begin
+        if (rst) begin
+            ln_data_1_in_al   <= '0;
+            ln_valid_1_in_al  <= '0;
+            ln_data_2_out_rs  <= '0;
+            ln_valid_2_out_rs <= '0;
+            sm_data_1_in_al   <= '0;
+            sm_valid_1_in_al  <= '0;
+            sm_data_2_out_rs  <= '0;
+            sm_valid_2_out_rs <= '0;
+        end else begin
+            // align: lane 1 arrives one cycle early, hold it for lane 2
+            ln_data_1_in_al   <= ln_data_1_in;
+            ln_valid_1_in_al  <= ln_valid_1_in;
+            sm_data_1_in_al   <= sm_data_1_in;
+            sm_valid_1_in_al  <= sm_valid_1_in;
+            // re-skew: group-stage outputs are paired; delay lane 2 to
+            // restore the native one-cycle column skew downstream
+            ln_data_2_out_rs  <= ln_data_2_out;
+            ln_valid_2_out_rs <= ln_valid_2_out;
+            sm_data_2_out_rs  <= sm_data_2_out;
+            sm_valid_2_out_rs <= sm_valid_2_out;
+        end
+    end
+
     always_ff @(posedge clk or posedge rst) begin
         if (rst) begin
             last_H_data_1_out <= '0;

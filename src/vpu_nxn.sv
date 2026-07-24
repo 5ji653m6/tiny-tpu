@@ -16,15 +16,25 @@
 // cache per lane cleared when loss is inactive, lr_d H-source mux selecting
 // last_H when pathway[1] else H_in, zeroed lr_d inputs when disabled).
 //
-// GROUP STAGES (layernorm, softmax) operate on a lane PAIR, and lane k
-// leads lane k+1 by one cycle in the systolic dataflow (BUG-SKEW-1 in
-// vpu.sv). Per pair p, the legacy alignment is replicated exactly: a
-// 1-cycle shift register delays the EVEN lane's (2p) data+valid at the
-// group stage input (align), and a 1-cycle shift register delays the ODD
-// lane's (2p+1) data+valid at the group stage output (re-skew). The shift
-// registers are free-running with reset clear and are used only when the
-// stage is enabled, so at N=2 the logic reduces exactly to the legacy
-// BUG-SKEW-1 registers.
+// GROUP STAGES (layernorm, softmax) are N-dependent (roadmap item 7b);
+// lane k leads lane k+1 by one cycle in the systolic dataflow
+// (BUG-SKEW-1 in vpu.sv). A generate switch selects the structure:
+//   N == 2: the legacy pair structure, textually identical to the
+//     pre-parameterization code -- per pair p a 1-cycle shift register
+//     delays the EVEN lane's (2p) data+valid at the group stage input
+//     (align), and a 1-cycle shift register delays the ODD lane's (2p+1)
+//     data+valid at the group stage output (re-skew). This branch is the
+//     bit-identity anchor for legacy vpu.sv (test_vpu_nxn_equiv compares
+//     cycle-by-cycle).
+//   N > 2: ONE layernorm_group_nxn and ONE softmax_group_nxn instance of
+//     width N. The group is ALL N lanes of one beat: lane k's data+valid
+//     is de-skewed at the group input by a shift-register chain of depth
+//     (N-1-k), and the group outputs are re-skewed by a chain of depth k
+//     per lane. The shift registers are free-running with reset clear
+//     (same discipline as the legacy BUG-SKEW-1 registers) and are used
+//     only when the stage is enabled. At N==2 these chains have depths
+//     1/0 and 0/1 -- i.e. the legacy align/re-skew registers are the
+//     N==2 special case of this structure.
 
 /*
 vpu_data_pathway is 7 bits: |sm(6)| |ln(5)| |gelu(4)| |bias(3)| |lr(2)| |loss(1)| |lr_d(0)|
@@ -105,37 +115,42 @@ module vpu_nxn #(
     logic gelu_to_loss_valid [N];
 
     // layernorm
+    // BUG-TOOLS-1 (iverilog 11): the group-stage output arrays are driven
+    // by whole unpacked-array output ports at N>2 (layernorm_group_nxn /
+    // softmax_group_nxn), which only propagate to a parent net declared
+    // 'wire' -- a parent 'logic' array silently reads X. Scalar element
+    // connections (the N==2 pair parents) work on wires too, so these are
+    // wires in both generate branches.
     logic signed [15:0] ln_data_in_s [N];
     logic ln_valid_in_s [N];
-    logic signed [15:0] ln_data_out_s [N];
-    logic ln_valid_out_s [N];
+    wire signed [15:0] ln_data_out_s [N];
+    wire ln_valid_out_s [N];
 
     // layernorm to loss intermediate values
     logic signed [15:0] ln_to_loss_data [N];
     logic ln_to_loss_valid [N];
 
-    // softmax
+    // softmax (outputs are wires: BUG-TOOLS-1, see layernorm above)
     logic signed [15:0] sm_data_in_s [N];
     logic sm_valid_in_s [N];
-    logic signed [15:0] sm_data_out_s [N];
-    logic sm_valid_out_s [N];
+    wire signed [15:0] sm_data_out_s [N];
+    wire sm_valid_out_s [N];
 
     // softmax to loss intermediate values
     logic signed [15:0] sm_to_loss_data [N];
     logic sm_to_loss_valid [N];
 
-    // BUG-SKEW-1 fix, per pair: align the even lane to the odd lane at each
-    // group stage's input (1-cycle delay), then re-apply the native skew at
-    // its output (delay the odd lane by 1 cycle) so downstream per-lane
-    // stages and VPU output timing are unchanged. Indexed by pair p.
-    logic signed [15:0] ln_data_in_al [PAIRS];
-    logic               ln_valid_in_al [PAIRS];
-    logic signed [15:0] ln_data_out_rs [PAIRS];
-    logic               ln_valid_out_rs [PAIRS];
-    logic signed [15:0] sm_data_in_al [PAIRS];
-    logic               sm_valid_in_al [PAIRS];
-    logic signed [15:0] sm_data_out_rs [PAIRS];
-    logic               sm_valid_out_rs [PAIRS];
+    // Group-stage outputs as consumed by the stage-chain routing: one
+    // uniform per-lane view in both generate branches. The generate
+    // branches below drive these from their own scoped signals --
+    // N == 2: even lanes take the group output directly, odd lanes the
+    //   1-cycle re-skewed output (legacy BUG-SKEW-1 wiring);
+    // N > 2: lane k takes the group output delayed by k cycles (re-skew
+    //   chain restoring the native column skew).
+    logic signed [15:0] ln_data_out_routed [N];
+    logic               ln_valid_out_routed [N];
+    logic signed [15:0] sm_data_out_routed [N];
+    logic               sm_valid_out_routed [N];
 
     // loss
     logic signed [15:0] loss_data_in_s [N];
@@ -222,40 +237,6 @@ module vpu_nxn #(
                 .gelu_overflow_out_2()
             );
 
-            layernorm_parent layernorm_parent_inst (
-                .clk(clk),
-                .rst(rst),
-
-                .ln_data_1_in(ln_data_in_al[p]),     // BUG-SKEW-1: even lane aligned to odd lane
-                .ln_data_2_in(ln_data_in_s[2*p+1]),
-                .ln_valid_1_in(ln_valid_in_al[p]),   // BUG-SKEW-1: even lane aligned to odd lane
-                .ln_valid_2_in(ln_valid_in_s[2*p+1]),
-
-                .ln_data_1_out(ln_data_out_s[2*p]),
-                .ln_data_2_out(ln_data_out_s[2*p+1]),
-                .ln_valid_1_out(ln_valid_out_s[2*p]),
-                .ln_valid_2_out(ln_valid_out_s[2*p+1]),
-                .ln_overflow_out_1(),   // BUG-OVF-1: observable via hierarchical reference
-                .ln_overflow_out_2()
-            );
-
-            softmax_parent softmax_parent_inst (
-                .clk(clk),
-                .rst(rst),
-
-                .sm_data_1_in(sm_data_in_al[p]),     // BUG-SKEW-1: even lane aligned to odd lane
-                .sm_data_2_in(sm_data_in_s[2*p+1]),
-                .sm_valid_1_in(sm_valid_in_al[p]),   // BUG-SKEW-1: even lane aligned to odd lane
-                .sm_valid_2_in(sm_valid_in_s[2*p+1]),
-
-                .sm_data_1_out(sm_data_out_s[2*p]),
-                .sm_data_2_out(sm_data_out_s[2*p+1]),
-                .sm_valid_1_out(sm_valid_out_s[2*p]),
-                .sm_valid_2_out(sm_valid_out_s[2*p+1]),
-                .sm_overflow_out_1(),   // BUG-OVF-1: observable via hierarchical reference
-                .sm_overflow_out_2()
-            );
-
             loss_parent loss_parent_inst (
                 .clk(clk),
                 .rst(rst),
@@ -299,10 +280,246 @@ module vpu_nxn #(
         end
     endgenerate
 
-    // Combinational stage-chain routing, replicated per lane. Even lanes
-    // (k = 2p) take group-stage outputs directly; odd lanes (k = 2p+1) take
-    // the re-skewed (1-cycle delayed) group-stage outputs, matching the
-    // legacy _1/_2 wiring at N=2.
+    // ------------------------------------------------------------------
+    // Group stages (layernorm, softmax): N-dependent structure.
+    //   N == 2: legacy per-pair 2-lane parents + BUG-SKEW-1 align/re-skew
+    //     registers, textually identical to the pre-7b code (bit-identity
+    //     anchor for vpu.sv).
+    //   N > 2: one N-wide layernorm_group_nxn / softmax_group_nxn with
+    //     full de-skew (lane k delayed N-1-k cycles at the input) and
+    //     re-skew (lane k delayed k cycles at the output). All shift
+    //     registers are free-running with reset clear, the same
+    //     discipline as the legacy BUG-SKEW-1 registers.
+    // Both branches drive the module-scope *_routed view consumed by the
+    // stage-chain routing below.
+    genvar gp, gk;
+    generate
+        if (N == 2) begin : gen_group_pair
+            // BUG-SKEW-1 fix, per pair: align the even lane to the odd lane at each
+            // group stage's input (1-cycle delay), then re-apply the native skew at
+            // its output (delay the odd lane by 1 cycle) so downstream per-lane
+            // stages and VPU output timing are unchanged. Indexed by pair p.
+            logic signed [15:0] ln_data_in_al [PAIRS];
+            logic               ln_valid_in_al [PAIRS];
+            logic signed [15:0] ln_data_out_rs [PAIRS];
+            logic               ln_valid_out_rs [PAIRS];
+            logic signed [15:0] sm_data_in_al [PAIRS];
+            logic               sm_valid_in_al [PAIRS];
+            logic signed [15:0] sm_data_out_rs [PAIRS];
+            logic               sm_valid_out_rs [PAIRS];
+
+            // Legacy pair structure, textually identical to the pre-7b code.
+            for (gp = 0; gp < PAIRS; gp++) begin : gen_pair
+                layernorm_parent layernorm_parent_inst (
+                    .clk(clk),
+                    .rst(rst),
+
+                    .ln_data_1_in(ln_data_in_al[gp]),     // BUG-SKEW-1: even lane aligned to odd lane
+                    .ln_data_2_in(ln_data_in_s[2*gp+1]),
+                    .ln_valid_1_in(ln_valid_in_al[gp]),   // BUG-SKEW-1: even lane aligned to odd lane
+                    .ln_valid_2_in(ln_valid_in_s[2*gp+1]),
+
+                    .ln_data_1_out(ln_data_out_s[2*gp]),
+                    .ln_data_2_out(ln_data_out_s[2*gp+1]),
+                    .ln_valid_1_out(ln_valid_out_s[2*gp]),
+                    .ln_valid_2_out(ln_valid_out_s[2*gp+1]),
+                    .ln_overflow_out_1(),   // BUG-OVF-1: observable via hierarchical reference
+                    .ln_overflow_out_2()
+                );
+
+                softmax_parent softmax_parent_inst (
+                    .clk(clk),
+                    .rst(rst),
+
+                    .sm_data_1_in(sm_data_in_al[gp]),     // BUG-SKEW-1: even lane aligned to odd lane
+                    .sm_data_2_in(sm_data_in_s[2*gp+1]),
+                    .sm_valid_1_in(sm_valid_in_al[gp]),   // BUG-SKEW-1: even lane aligned to odd lane
+                    .sm_valid_2_in(sm_valid_in_s[2*gp+1]),
+
+                    .sm_data_1_out(sm_data_out_s[2*gp]),
+                    .sm_data_2_out(sm_data_out_s[2*gp+1]),
+                    .sm_valid_1_out(sm_valid_out_s[2*gp]),
+                    .sm_valid_2_out(sm_valid_out_s[2*gp+1]),
+                    .sm_overflow_out_1(),   // BUG-OVF-1: observable via hierarchical reference
+                    .sm_overflow_out_2()
+                );
+            end
+
+            // BUG-SKEW-1 fix, per pair: 1-cycle shift registers implementing the
+            // lane alignment described at the declarations above. Free-running (no
+            // enable) so valid pulse trains are delayed exactly one cycle; when a
+            // group stage is bypassed these shift zeros and are unused.
+            always_ff @(posedge clk or posedge rst) begin
+                if (rst) begin
+                    for (int p = 0; p < PAIRS; p++) begin
+                        ln_data_in_al[p]   <= '0;
+                        ln_valid_in_al[p]  <= '0;
+                        ln_data_out_rs[p]  <= '0;
+                        ln_valid_out_rs[p] <= '0;
+                        sm_data_in_al[p]   <= '0;
+                        sm_valid_in_al[p]  <= '0;
+                        sm_data_out_rs[p]  <= '0;
+                        sm_valid_out_rs[p] <= '0;
+                    end
+                end else begin
+                    for (int p = 0; p < PAIRS; p++) begin
+                        // align: the even lane arrives one cycle early, hold it for the odd lane
+                        ln_data_in_al[p]   <= ln_data_in_s[2*p];
+                        ln_valid_in_al[p]  <= ln_valid_in_s[2*p];
+                        sm_data_in_al[p]   <= sm_data_in_s[2*p];
+                        sm_valid_in_al[p]  <= sm_valid_in_s[2*p];
+                        // re-skew: group-stage outputs are paired; delay the odd lane
+                        // to restore the native one-cycle column skew downstream
+                        ln_data_out_rs[p]  <= ln_data_out_s[2*p+1];
+                        ln_valid_out_rs[p] <= ln_valid_out_s[2*p+1];
+                        sm_data_out_rs[p]  <= sm_data_out_s[2*p+1];
+                        sm_valid_out_rs[p] <= sm_valid_out_s[2*p+1];
+                    end
+                end
+            end
+
+            // Uniform per-lane routed view: even lanes direct, odd lanes
+            // re-skewed (the legacy _1/_2 wiring).
+            for (gp = 0; gp < PAIRS; gp++) begin : gen_route
+                assign ln_data_out_routed[2*gp]    = ln_data_out_s[2*gp];
+                assign ln_valid_out_routed[2*gp]   = ln_valid_out_s[2*gp];
+                assign ln_data_out_routed[2*gp+1]  = ln_data_out_rs[gp];
+                assign ln_valid_out_routed[2*gp+1] = ln_valid_out_rs[gp];
+                assign sm_data_out_routed[2*gp]    = sm_data_out_s[2*gp];
+                assign sm_valid_out_routed[2*gp]   = sm_valid_out_s[2*gp];
+                assign sm_data_out_routed[2*gp+1]  = sm_data_out_rs[gp];
+                assign sm_valid_out_routed[2*gp+1] = sm_valid_out_rs[gp];
+            end
+        end else begin : gen_group_nxn
+            // De-skewed (beat-aligned) group inputs: lane k delayed N-1-k cycles.
+            logic signed [15:0] ln_data_in_al [N];
+            logic               ln_valid_in_al [N];
+            logic signed [15:0] sm_data_in_al [N];
+            logic               sm_valid_in_al [N];
+
+            // Group-stage overflow outputs are unused here (BUG-OVF-1 style
+            // observability is via the leaf's own mirrors).
+            logic ln_overflow_unused [N];
+            logic sm_overflow_unused [N];
+
+            // One N-wide group stage each; the N lanes of one beat form the group.
+            layernorm_group_nxn #(
+                .SYSTOLIC_ARRAY_WIDTH(N)
+            ) layernorm_group_nxn_inst (
+                .clk(clk),
+                .rst(rst),
+
+                .ln_valid_in(ln_valid_in_al),
+                .ln_data_in(ln_data_in_al),
+
+                .ln_data_out(ln_data_out_s),
+                .ln_valid_out(ln_valid_out_s),
+                .ln_overflow_out(ln_overflow_unused)
+            );
+
+            softmax_group_nxn #(
+                .SYSTOLIC_ARRAY_WIDTH(N)
+            ) softmax_group_nxn_inst (
+                .clk(clk),
+                .rst(rst),
+
+                .sm_valid_in(sm_valid_in_al),
+                .sm_data_in(sm_data_in_al),
+
+                .sm_data_out(sm_data_out_s),
+                .sm_valid_out(sm_valid_out_s),
+                .sm_overflow_out(sm_overflow_unused)
+            );
+
+            // Per-lane de-skew / re-skew shift-register chains. Free-running
+            // with reset clear (same discipline as the BUG-SKEW-1 registers);
+            // when a group stage is bypassed these shift zeros and are unused.
+            for (gk = 0; gk < N; gk++) begin : gen_skew
+                localparam int D_IN  = N - 1 - gk;  // de-skew depth: lane k waits for lane N-1
+                localparam int D_OUT = gk;          // re-skew depth: restore the column skew
+
+                if (D_IN == 0) begin : gen_din_direct
+                    assign ln_data_in_al[gk]  = ln_data_in_s[gk];
+                    assign ln_valid_in_al[gk] = ln_valid_in_s[gk];
+                    assign sm_data_in_al[gk]  = sm_data_in_s[gk];
+                    assign sm_valid_in_al[gk] = sm_valid_in_s[gk];
+                end else begin : gen_din_chain
+                    logic signed [15:0] ln_d [D_IN];
+                    logic               ln_v [D_IN];
+                    logic signed [15:0] sm_d [D_IN];
+                    logic               sm_v [D_IN];
+                    always_ff @(posedge clk or posedge rst) begin
+                        if (rst) begin
+                            for (int i = 0; i < D_IN; i++) begin
+                                ln_d[i] <= '0;
+                                ln_v[i] <= 1'b0;
+                                sm_d[i] <= '0;
+                                sm_v[i] <= 1'b0;
+                            end
+                        end else begin
+                            ln_d[0] <= ln_data_in_s[gk];
+                            ln_v[0] <= ln_valid_in_s[gk];
+                            sm_d[0] <= sm_data_in_s[gk];
+                            sm_v[0] <= sm_valid_in_s[gk];
+                            for (int i = 1; i < D_IN; i++) begin
+                                ln_d[i] <= ln_d[i-1];
+                                ln_v[i] <= ln_v[i-1];
+                                sm_d[i] <= sm_d[i-1];
+                                sm_v[i] <= sm_v[i-1];
+                            end
+                        end
+                    end
+                    assign ln_data_in_al[gk]  = ln_d[D_IN-1];
+                    assign ln_valid_in_al[gk] = ln_v[D_IN-1];
+                    assign sm_data_in_al[gk]  = sm_d[D_IN-1];
+                    assign sm_valid_in_al[gk] = sm_v[D_IN-1];
+                end
+
+                if (D_OUT == 0) begin : gen_dout_direct
+                    assign ln_data_out_routed[gk]  = ln_data_out_s[gk];
+                    assign ln_valid_out_routed[gk] = ln_valid_out_s[gk];
+                    assign sm_data_out_routed[gk]  = sm_data_out_s[gk];
+                    assign sm_valid_out_routed[gk] = sm_valid_out_s[gk];
+                end else begin : gen_dout_chain
+                    logic signed [15:0] ln_d [D_OUT];
+                    logic               ln_v [D_OUT];
+                    logic signed [15:0] sm_d [D_OUT];
+                    logic               sm_v [D_OUT];
+                    always_ff @(posedge clk or posedge rst) begin
+                        if (rst) begin
+                            for (int i = 0; i < D_OUT; i++) begin
+                                ln_d[i] <= '0;
+                                ln_v[i] <= 1'b0;
+                                sm_d[i] <= '0;
+                                sm_v[i] <= 1'b0;
+                            end
+                        end else begin
+                            ln_d[0] <= ln_data_out_s[gk];
+                            ln_v[0] <= ln_valid_out_s[gk];
+                            sm_d[0] <= sm_data_out_s[gk];
+                            sm_v[0] <= sm_valid_out_s[gk];
+                            for (int i = 1; i < D_OUT; i++) begin
+                                ln_d[i] <= ln_d[i-1];
+                                ln_v[i] <= ln_v[i-1];
+                                sm_d[i] <= sm_d[i-1];
+                                sm_v[i] <= sm_v[i-1];
+                            end
+                        end
+                    end
+                    assign ln_data_out_routed[gk]  = ln_d[D_OUT-1];
+                    assign ln_valid_out_routed[gk] = ln_v[D_OUT-1];
+                    assign sm_data_out_routed[gk]  = sm_d[D_OUT-1];
+                    assign sm_valid_out_routed[gk] = sm_v[D_OUT-1];
+                end
+            end
+        end
+    endgenerate
+
+    // Combinational stage-chain routing, replicated per lane. Group-stage
+    // outputs are consumed through the uniform per-lane *_routed view,
+    // which the generate branches drive with the N-appropriate re-skew
+    // (legacy odd-lane 1-cycle delay at N=2, per-lane delay-k chain at
+    // N>2), so this block is identical for both structures.
     always @(*) begin
         for (int k = 0; k < N; k++) begin
             // Default assignments for all intermediate signals to prevent latch inference.
@@ -406,13 +623,9 @@ module vpu_nxn #(
                     ln_valid_in_s[k] = gelu_to_loss_valid[k];
 
                     // connect layernorm outputs to intermediate values
-                    if (k % 2 == 0) begin
-                        ln_to_loss_data[k]  = ln_data_out_s[k];
-                        ln_to_loss_valid[k] = ln_valid_out_s[k];
-                    end else begin
-                        ln_to_loss_data[k]  = ln_data_out_rs[k/2];   // BUG-SKEW-1: re-skewed
-                        ln_to_loss_valid[k] = ln_valid_out_rs[k/2];  // BUG-SKEW-1: re-skewed
-                    end
+                    // (uniform per-lane view; re-skew lives in the generate branches)
+                    ln_to_loss_data[k]  = ln_data_out_routed[k];
+                    ln_to_loss_valid[k] = ln_valid_out_routed[k];
                 end else begin
                     // disable inputs
                     ln_data_in_s[k]  = 16'b0;
@@ -430,13 +643,9 @@ module vpu_nxn #(
                     sm_valid_in_s[k] = ln_to_loss_valid[k];
 
                     // connect softmax outputs to intermediate values
-                    if (k % 2 == 0) begin
-                        sm_to_loss_data[k]  = sm_data_out_s[k];
-                        sm_to_loss_valid[k] = sm_valid_out_s[k];
-                    end else begin
-                        sm_to_loss_data[k]  = sm_data_out_rs[k/2];   // BUG-SKEW-1: re-skewed
-                        sm_to_loss_valid[k] = sm_valid_out_rs[k/2];  // BUG-SKEW-1: re-skewed
-                    end
+                    // (uniform per-lane view; re-skew lives in the generate branches)
+                    sm_to_loss_data[k]  = sm_data_out_routed[k];
+                    sm_to_loss_valid[k] = sm_valid_out_routed[k];
                 end else begin
                     // disable inputs
                     sm_data_in_s[k]  = 16'b0;
@@ -492,39 +701,6 @@ module vpu_nxn #(
                     vpu_data_mux[k]  = loss_to_lrd_data[k];
                     vpu_valid_mux[k] = loss_to_lrd_valid[k];
                 end
-            end
-        end
-    end
-
-    // BUG-SKEW-1 fix, per pair: 1-cycle shift registers implementing the
-    // lane alignment described at the declarations above. Free-running (no
-    // enable) so valid pulse trains are delayed exactly one cycle; when a
-    // group stage is bypassed these shift zeros and are unused.
-    always_ff @(posedge clk or posedge rst) begin
-        if (rst) begin
-            for (int p = 0; p < PAIRS; p++) begin
-                ln_data_in_al[p]   <= '0;
-                ln_valid_in_al[p]  <= '0;
-                ln_data_out_rs[p]  <= '0;
-                ln_valid_out_rs[p] <= '0;
-                sm_data_in_al[p]   <= '0;
-                sm_valid_in_al[p]  <= '0;
-                sm_data_out_rs[p]  <= '0;
-                sm_valid_out_rs[p] <= '0;
-            end
-        end else begin
-            for (int p = 0; p < PAIRS; p++) begin
-                // align: the even lane arrives one cycle early, hold it for the odd lane
-                ln_data_in_al[p]   <= ln_data_in_s[2*p];
-                ln_valid_in_al[p]  <= ln_valid_in_s[2*p];
-                sm_data_in_al[p]   <= sm_data_in_s[2*p];
-                sm_valid_in_al[p]  <= sm_valid_in_s[2*p];
-                // re-skew: group-stage outputs are paired; delay the odd lane
-                // to restore the native one-cycle column skew downstream
-                ln_data_out_rs[p]  <= ln_data_out_s[2*p+1];
-                ln_valid_out_rs[p] <= ln_valid_out_s[2*p+1];
-                sm_data_out_rs[p]  <= sm_data_out_s[2*p+1];
-                sm_valid_out_rs[p] <= sm_valid_out_s[2*p+1];
             end
         end
     end

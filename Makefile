@@ -165,6 +165,21 @@ test_softmax_parent: $(SIM_BUILD_DIR)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv softmax_parent.vcd waveforms/ 2>/dev/null || true
 
+# Control unit (ISA decode) test (agent-authored RTL, harness-authored gate test)
+test_control_unit: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s control_unit -s dump -g2012 $(SOURCES) test/dump_control_unit.sv
+	PYTHONOPTIMIZE=$(NOASSERT) MODULE=test_control_unit $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv control_unit.vcd waveforms/ 2>/dev/null || true
+
+# Full-chip softmax-pathway test via the widened tpu port (agent-authored
+# RTL, harness-authored gate test)
+test_tpu_softmax: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s tpu -s dump -g2012 $(SOURCES) test/dump_tpu_softmax.sv
+	PYTHONOPTIMIZE=$(NOASSERT) MODULE=test_tpu_softmax $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv tpu_softmax.vcd waveforms/ 2>/dev/null || true
+
 test_leaky_relu_derivative_child: $(SIM_BUILD_DIR)
 	$(IVERILOG) -o $(SIM_VVP) -s leaky_relu_derivative_child -s dump -g2012 $(SOURCES) test/dump_leaky_relu_derivative_child.sv
 	PYTHONOPTIMIZE=$(NOASSERT) MODULE=test_leaky_relu_derivative_child $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)

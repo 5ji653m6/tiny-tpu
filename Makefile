@@ -60,7 +60,8 @@ SOURCES = src/pe.sv \
 		  src/vpu_nxn.sv \
 		  src/tpu_nxn.sv \
 		  src/layernorm_group_nxn.sv \
-		  src/softmax_group_nxn.sv
+		  src/softmax_group_nxn.sv \
+		  src/control_unit_nxn.sv
 
 # MODIFY 1) variable next to -s 
 # MODIFY 2) variable next to $(SOURCES)
@@ -375,3 +376,19 @@ test_softmax_group_nxn: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) MODULE=test_softmax_group_nxn $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv softmax_group_nxn.vcd waveforms/ 2>/dev/null || true
+
+# N-host-lane instruction decoder test at N=2 (item 8a; agent-authored
+# RTL, harness-authored gate test). Default SYSTOLIC_ARRAY_WIDTH=2 — the
+# N=2 drop-in for control_unit.
+test_control_unit_nxn: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s control_unit_nxn -s dump -g2012 $(SOURCES) test/dump_control_unit_nxn.sv
+	PYTHONOPTIMIZE=$(NOASSERT) MODULE=test_control_unit_nxn $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv control_unit_nxn.vcd waveforms/ 2>/dev/null || true
+
+# Same decoder at N=4: exercises the appended host lanes k >= 2.
+test_control_unit_nxn_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s control_unit_nxn -s dump -g2012 -Pcontrol_unit_nxn.SYSTOLIC_ARRAY_WIDTH=4 $(SOURCES) test/dump_control_unit_nxn.sv
+	PYTHONOPTIMIZE=$(NOASSERT) CU_NXN_N=4 MODULE=test_control_unit_nxn $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv control_unit_nxn.vcd waveforms/control_unit_nxn_n4.vcd 2>/dev/null || true

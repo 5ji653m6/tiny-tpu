@@ -116,6 +116,9 @@ module unified_buffer_nxn #(
     logic [15:0]        wr_ptr_next;
     logic [15:0]        rd_input_ptr_next;
     logic signed [15:0] rd_weight_ptr_next;
+    // Number of lanes that actually read from the shared weight pointer
+    // during the current cycle (counted in the walk loops below).
+    int                 rd_weight_lanes_read;
     logic [15:0]        rd_Y_ptr_next;
     logic [15:0]        rd_H_ptr_next;
     logic [15:0]        rd_grad_weight_ptr_next;
@@ -306,6 +309,7 @@ module unified_buffer_nxn #(
             // READING LOGIC (for weights from UB to top of systolic array)
             if (rd_weight_time_counter + 1 < rd_weight_row_size + rd_weight_col_size) begin
                 rd_weight_ptr_next = rd_weight_ptr;  // BUG-UB-1 fix
+                rd_weight_lanes_read = 0;
                 if(rd_weight_transpose) begin
                     // For transposed matrices (for loop should increment)
                     for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
@@ -313,12 +317,19 @@ module unified_buffer_nxn #(
                             ub_rd_weight_valid_out[i] <= 1'b1;
                             ub_rd_weight_data_out[i] <= ub_memory[rd_weight_ptr_next];
                             rd_weight_ptr_next = rd_weight_ptr_next + rd_weight_skip_size;
+                            rd_weight_lanes_read = rd_weight_lanes_read + 1;
                         end else begin
                             ub_rd_weight_valid_out[i] <= 0;
                             ub_rd_weight_data_out[i] <= '0;
                         end
                     end
-                    rd_weight_ptr_next = rd_weight_ptr_next - rd_weight_skip_size - 1;
+                    // Generalized end-of-cycle correction (any column count C, not just C=2):
+                    // undo all L lane skips from this cycle, step back 1 element, and once the
+                    // leading lanes start retiring (t >= C-1) hop forward one row (C+1 = skip).
+                    // C is the original command col size, i.e. skip-1; equals the legacy
+                    // -(skip+1) constant at C=2 while any reads remain.
+                    rd_weight_ptr_next = rd_weight_ptr_next - rd_weight_skip_size*rd_weight_lanes_read - 1
+                                       + ((rd_weight_time_counter >= rd_weight_skip_size - 2) ? rd_weight_skip_size : 0);
                 end else begin
                     // For untransposed matrices (for loop should decrement)
                     for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
@@ -326,12 +337,19 @@ module unified_buffer_nxn #(
                             ub_rd_weight_valid_out[i] <= 1'b1;
                             ub_rd_weight_data_out[i] <= ub_memory[rd_weight_ptr_next];
                             rd_weight_ptr_next = rd_weight_ptr_next - rd_weight_skip_size;
+                            rd_weight_lanes_read = rd_weight_lanes_read + 1;
                         end else begin
                             ub_rd_weight_valid_out[i] <= 0;
                             ub_rd_weight_data_out[i] <= '0;
                         end
                     end
-                    rd_weight_ptr_next = rd_weight_ptr_next + rd_weight_skip_size + 1;
+                    // Generalized end-of-cycle correction (any column count C, not just C=2):
+                    // undo all L lane skips from this cycle, step back one row (C = skip-1),
+                    // and while the trailing lanes are still joining (t < C-1) hop forward one
+                    // row plus one element (C+1 = skip). C is the original command col size;
+                    // equals the legacy +(skip+1) constant at C=2 while any reads remain.
+                    rd_weight_ptr_next = rd_weight_ptr_next + rd_weight_skip_size*rd_weight_lanes_read - (rd_weight_skip_size - 1)
+                                       + ((rd_weight_time_counter < rd_weight_skip_size - 2) ? rd_weight_skip_size : 0);
                 end
                 rd_weight_time_counter <= rd_weight_time_counter + 1;
                 rd_weight_ptr <= rd_weight_ptr_next;

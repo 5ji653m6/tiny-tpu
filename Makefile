@@ -451,3 +451,25 @@ test_tpu_nxn_ic_attn_n4: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_IC_N=4 MODULE=test_tpu_nxn_ic_attn_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv tpu_nxn_ic.vcd waveforms/tpu_nxn_ic_attn_n4.vcd 2>/dev/null || true
+
+# Sequencer LOOP control word, leaf level (item 12; agent-authored
+# RTL in src/instr_seq_nxn.sv): program word = {ctrl, legacy_word},
+# LOOP(count, len) repeats the next len words count times with one
+# bubble on the LOOP word; count=0 skips; reserved ops no-op; loop
+# state resets per run. Exact emission streams checked cycle by cycle.
+test_instr_seq_nxn_loop_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s instr_seq_nxn -s dump -g2012 -Pinstr_seq_nxn.SYSTOLIC_ARRAY_WIDTH=4 $(SOURCES) test/dump_instr_seq_nxn.sv
+	PYTHONOPTIMIZE=$(NOASSERT) INSTR_SEQ_N=4 MODULE=test_instr_seq_nxn_loop $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv instr_seq_nxn.vcd waveforms/instr_seq_nxn_loop_n4.vcd 2>/dev/null || true
+
+# Looped attention from a loaded program (item 12 top half): the
+# phase-1 attention composite (S=Q@K^T, softmax) as a 52-word body
+# repeated 3x by ONE LOOP control word — 62 words total vs 165
+# unrolled. P lands at the UB write pointer each rep (@32/@48/@64),
+# bit-identical against the item-11 hardware-exact golden.
+test_tpu_nxn_prog_attn_loop_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=4 $(SOURCES) test/dump_tpu_nxn_prog.sv
+	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=4 MODULE=test_tpu_nxn_prog_attn_loop_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_attn_loop_n4.vcd 2>/dev/null || true

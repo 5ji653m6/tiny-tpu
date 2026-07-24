@@ -4,6 +4,12 @@
 // 286 words). Outputs are left unconnected (results live in UB memory,
 // read hierarchically by the cocotb test). Written by the harness
 // author, not the agent.
+//
+// Item 12: prog_wr_data is W+1 bits — the program word is {ctrl,
+// legacy_word}, ctrl the MSB (LOOP control-word construct). Until the
+// item-12 RTL widens the DUT port to match, iverilog prunes the MSB
+// (0 for all pre-item-12 programs) with a warning; the item-12 tests
+// fail red by design in the meantime.
 `timescale 1ns/1ps
 `default_nettype none
 
@@ -19,7 +25,7 @@ module dump #(
 
     // Program load + run (the instruction sequencer interface)
     logic prog_wr_en;
-    logic [W-1:0] prog_wr_data;
+    logic [W:0] prog_wr_data;
     logic run;
     logic busy;
 

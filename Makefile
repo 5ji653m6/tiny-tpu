@@ -52,7 +52,8 @@ SOURCES = src/pe.sv \
 		  src/tpu.sv \
 		  src/gradient_descent.sv \
 		  src/gelu_child.sv \
-		  src/gelu_parent.sv
+		  src/gelu_parent.sv \
+		  src/layernorm_parent.sv
 
 # MODIFY 1) variable next to -s 
 # MODIFY 2) variable next to $(SOURCES)
@@ -148,6 +149,13 @@ test_gelu_parent: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) MODULE=test_gelu_parent $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv gelu_parent.vcd waveforms/ 2>/dev/null || true
+
+# LayerNorm module test (agent-authored RTL, harness-authored gate test)
+test_layernorm_parent: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s layernorm_parent -s dump -g2012 $(SOURCES) test/dump_layernorm_parent.sv
+	PYTHONOPTIMIZE=$(NOASSERT) MODULE=test_layernorm_parent $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv layernorm_parent.vcd waveforms/ 2>/dev/null || true
 
 test_leaky_relu_derivative_child: $(SIM_BUILD_DIR)
 	$(IVERILOG) -o $(SIM_VVP) -s leaky_relu_derivative_child -s dump -g2012 $(SOURCES) test/dump_leaky_relu_derivative_child.sv

@@ -28,26 +28,45 @@ module unified_buffer_nxn #(
     input logic [15:0] learning_rate_in,
 
     // Read ports from UB to left side of systolic array
-    output logic [15:0] ub_rd_input_data_out [SYSTOLIC_ARRAY_WIDTH],
-    output logic ub_rd_input_valid_out [SYSTOLIC_ARRAY_WIDTH],
+    output wire [15:0] ub_rd_input_data_out [SYSTOLIC_ARRAY_WIDTH],
+    output wire ub_rd_input_valid_out [SYSTOLIC_ARRAY_WIDTH],
 
     // Read ports from UB to top of systolic array
-    output logic [15:0] ub_rd_weight_data_out [SYSTOLIC_ARRAY_WIDTH],
-    output logic ub_rd_weight_valid_out [SYSTOLIC_ARRAY_WIDTH],
+    output wire [15:0] ub_rd_weight_data_out [SYSTOLIC_ARRAY_WIDTH],
+    output wire ub_rd_weight_valid_out [SYSTOLIC_ARRAY_WIDTH],
 
     // Read ports from UB to bias modules in VPU
-    output logic [15:0] ub_rd_bias_data_out [SYSTOLIC_ARRAY_WIDTH],
+    output wire [15:0] ub_rd_bias_data_out [SYSTOLIC_ARRAY_WIDTH],
 
     // Read ports from UB to loss modules (Y matrices) in VPU
-    output logic [15:0] ub_rd_Y_data_out [SYSTOLIC_ARRAY_WIDTH],
+    output wire [15:0] ub_rd_Y_data_out [SYSTOLIC_ARRAY_WIDTH],
 
     // Read ports from UB to activation derivative modules (H matrices) in VPU
-    output logic [15:0] ub_rd_H_data_out [SYSTOLIC_ARRAY_WIDTH],
+    output wire [15:0] ub_rd_H_data_out [SYSTOLIC_ARRAY_WIDTH],
 
     // Outputs to send number of columns to systolic array
     output logic [15:0] ub_rd_col_size_out,
     output logic ub_rd_col_size_valid_out
 );
+
+    // BUG-TOOLS-1 (iverilog 11): variable unpacked-array
+    // output ports propagate X to connected parent nets; the
+    // public ports are wires assigned from these mirrors.
+    logic [15:0] ub_rd_input_data_out_r [SYSTOLIC_ARRAY_WIDTH];  // BUG-TOOLS-1 mirror
+    logic ub_rd_input_valid_out_r [SYSTOLIC_ARRAY_WIDTH];  // BUG-TOOLS-1 mirror
+    logic [15:0] ub_rd_weight_data_out_r [SYSTOLIC_ARRAY_WIDTH];  // BUG-TOOLS-1 mirror
+    logic ub_rd_weight_valid_out_r [SYSTOLIC_ARRAY_WIDTH];  // BUG-TOOLS-1 mirror
+    logic [15:0] ub_rd_bias_data_out_r [SYSTOLIC_ARRAY_WIDTH];  // BUG-TOOLS-1 mirror
+    logic [15:0] ub_rd_Y_data_out_r [SYSTOLIC_ARRAY_WIDTH];  // BUG-TOOLS-1 mirror
+    logic [15:0] ub_rd_H_data_out_r [SYSTOLIC_ARRAY_WIDTH];  // BUG-TOOLS-1 mirror
+
+    assign ub_rd_input_data_out = ub_rd_input_data_out_r;
+    assign ub_rd_input_valid_out = ub_rd_input_valid_out_r;
+    assign ub_rd_weight_data_out = ub_rd_weight_data_out_r;
+    assign ub_rd_weight_valid_out = ub_rd_weight_valid_out_r;
+    assign ub_rd_bias_data_out = ub_rd_bias_data_out_r;
+    assign ub_rd_Y_data_out = ub_rd_Y_data_out_r;
+    assign ub_rd_H_data_out = ub_rd_H_data_out_r;
 
     logic [15:0] ub_memory [0:UNIFIED_BUFFER_WIDTH-1];
 
@@ -207,13 +226,13 @@ module unified_buffer_nxn #(
 
             // set internal registers to 0
             for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
-                ub_rd_input_data_out[i] <= '0;
-                ub_rd_input_valid_out[i] <= '0;
-                ub_rd_weight_data_out[i] <= '0;
-                ub_rd_weight_valid_out[i] <= '0;
-                ub_rd_bias_data_out[i] <= '0;
-                ub_rd_Y_data_out[i] <= '0;
-                ub_rd_H_data_out[i] <= '0;
+                ub_rd_input_data_out_r[i] <= '0;
+                ub_rd_input_valid_out_r[i] <= '0;
+                ub_rd_weight_data_out_r[i] <= '0;
+                ub_rd_weight_valid_out_r[i] <= '0;
+                ub_rd_bias_data_out_r[i] <= '0;
+                ub_rd_Y_data_out_r[i] <= '0;
+                ub_rd_H_data_out_r[i] <= '0;
                 value_old_in[i] <= '0;
             end
 
@@ -299,12 +318,12 @@ module unified_buffer_nxn #(
                     // For transposed matrices (for loop should increment)
                     for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
                         if(rd_input_time_counter >= i && rd_input_time_counter < rd_input_row_size + i && i < rd_input_col_size) begin 
-                            ub_rd_input_valid_out[i] <= 1'b1;
-                            ub_rd_input_data_out[i] <= ub_memory[rd_input_ptr_next];
+                            ub_rd_input_valid_out_r[i] <= 1'b1;
+                            ub_rd_input_data_out_r[i] <= ub_memory[rd_input_ptr_next];
                             rd_input_ptr_next = rd_input_ptr_next + (rd_input_row_size - 1);
                         end else begin 
-                            ub_rd_input_valid_out[i] <= 1'b0;
-                            ub_rd_input_data_out[i] <= '0;
+                            ub_rd_input_valid_out_r[i] <= 1'b0;
+                            ub_rd_input_data_out_r[i] <= '0;
                         end
                     end
                     rd_input_ptr_next = rd_input_ptr_next + ascending_walk_correction(rd_input_row_size, rd_input_col_size, rd_input_time_counter);
@@ -312,12 +331,12 @@ module unified_buffer_nxn #(
                     // For untransposed matrices (for loop should decrement)
                     for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
                         if(rd_input_time_counter >= i && rd_input_time_counter < rd_input_row_size + i && i < rd_input_col_size) begin 
-                            ub_rd_input_valid_out[i] <= 1'b1;
-                            ub_rd_input_data_out[i] <= ub_memory[rd_input_ptr_next];
+                            ub_rd_input_valid_out_r[i] <= 1'b1;
+                            ub_rd_input_data_out_r[i] <= ub_memory[rd_input_ptr_next];
                             rd_input_ptr_next = rd_input_ptr_next + (rd_input_col_size - 1);
                         end else begin 
-                            ub_rd_input_valid_out[i] <= 1'b0;
-                            ub_rd_input_data_out[i] <= '0;
+                            ub_rd_input_valid_out_r[i] <= 1'b0;
+                            ub_rd_input_data_out_r[i] <= '0;
                         end
                     end
                     rd_input_ptr_next = rd_input_ptr_next + descending_walk_correction(rd_input_col_size, rd_input_row_size, rd_input_time_counter);
@@ -330,8 +349,8 @@ module unified_buffer_nxn #(
                 rd_input_col_size <= 0;
                 rd_input_time_counter <= '0;
                 for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
-                    ub_rd_input_valid_out[i] <= 1'b0;
-                    ub_rd_input_data_out[i] <= '0;
+                    ub_rd_input_valid_out_r[i] <= 1'b0;
+                    ub_rd_input_data_out_r[i] <= '0;
                 end
             end
 
@@ -343,13 +362,13 @@ module unified_buffer_nxn #(
                     // For transposed matrices (for loop should increment)
                     for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
                         if(rd_weight_time_counter >= i && rd_weight_time_counter < rd_weight_row_size + i && i < rd_weight_col_size) begin
-                            ub_rd_weight_valid_out[i] <= 1'b1;
-                            ub_rd_weight_data_out[i] <= ub_memory[rd_weight_ptr_next];
+                            ub_rd_weight_valid_out_r[i] <= 1'b1;
+                            ub_rd_weight_data_out_r[i] <= ub_memory[rd_weight_ptr_next];
                             rd_weight_ptr_next = rd_weight_ptr_next + rd_weight_skip_size;
                             rd_weight_lanes_read = rd_weight_lanes_read + 1;
                         end else begin
-                            ub_rd_weight_valid_out[i] <= 0;
-                            ub_rd_weight_data_out[i] <= '0;
+                            ub_rd_weight_valid_out_r[i] <= 0;
+                            ub_rd_weight_data_out_r[i] <= '0;
                         end
                     end
                     // Generalized end-of-cycle correction (any column count C, not just C=2):
@@ -363,13 +382,13 @@ module unified_buffer_nxn #(
                     // For untransposed matrices (for loop should decrement)
                     for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
                         if(rd_weight_time_counter >= i && rd_weight_time_counter < rd_weight_row_size + i && i < rd_weight_col_size) begin
-                            ub_rd_weight_valid_out[i] <= 1'b1;
-                            ub_rd_weight_data_out[i] <= ub_memory[rd_weight_ptr_next];
+                            ub_rd_weight_valid_out_r[i] <= 1'b1;
+                            ub_rd_weight_data_out_r[i] <= ub_memory[rd_weight_ptr_next];
                             rd_weight_ptr_next = rd_weight_ptr_next - rd_weight_skip_size;
                             rd_weight_lanes_read = rd_weight_lanes_read + 1;
                         end else begin
-                            ub_rd_weight_valid_out[i] <= 0;
-                            ub_rd_weight_data_out[i] <= '0;
+                            ub_rd_weight_valid_out_r[i] <= 0;
+                            ub_rd_weight_data_out_r[i] <= '0;
                         end
                     end
                     // Generalized end-of-cycle correction (any column count C, not just C=2):
@@ -388,8 +407,8 @@ module unified_buffer_nxn #(
                 rd_weight_col_size <= 0;
                 rd_weight_time_counter <= '0;
                 for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
-                    ub_rd_weight_valid_out[i] <= 0;
-                    ub_rd_weight_data_out[i] <= '0;
+                    ub_rd_weight_valid_out_r[i] <= 0;
+                    ub_rd_weight_data_out_r[i] <= '0;
                 end
             end
 
@@ -397,9 +416,9 @@ module unified_buffer_nxn #(
             if (rd_bias_time_counter + 1 < rd_bias_row_size + rd_bias_col_size) begin
                 for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
                     if(rd_bias_time_counter >= i && rd_bias_time_counter < rd_bias_row_size + i && i < rd_bias_col_size) begin
-                        ub_rd_bias_data_out[i] <= ub_memory[rd_bias_ptr + i];
+                        ub_rd_bias_data_out_r[i] <= ub_memory[rd_bias_ptr + i];
                     end else begin
-                        ub_rd_bias_data_out[i] <= '0;
+                        ub_rd_bias_data_out_r[i] <= '0;
                     end
                 end
                 rd_bias_time_counter <= rd_bias_time_counter + 1;
@@ -409,7 +428,7 @@ module unified_buffer_nxn #(
                 rd_bias_col_size <= 0;
                 rd_bias_time_counter <= '0;
                 for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
-                    ub_rd_bias_data_out[i] <= '0;
+                    ub_rd_bias_data_out_r[i] <= '0;
                 end
             end
 
@@ -418,10 +437,10 @@ module unified_buffer_nxn #(
                 rd_Y_ptr_next = rd_Y_ptr;  // BUG-UB-1 fix
                 for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
                     if(rd_Y_time_counter >= i && rd_Y_time_counter < rd_Y_row_size + i && i < rd_Y_col_size) begin
-                        ub_rd_Y_data_out[i] <= ub_memory[rd_Y_ptr_next];
+                        ub_rd_Y_data_out_r[i] <= ub_memory[rd_Y_ptr_next];
                         rd_Y_ptr_next = rd_Y_ptr_next + (rd_Y_col_size - 1);
                     end else begin
-                        ub_rd_Y_data_out[i] <= '0;
+                        ub_rd_Y_data_out_r[i] <= '0;
                     end
                 end
                 rd_Y_ptr_next = rd_Y_ptr_next + descending_walk_correction(rd_Y_col_size, rd_Y_row_size, rd_Y_time_counter);
@@ -433,7 +452,7 @@ module unified_buffer_nxn #(
                 rd_Y_col_size <= 0;
                 rd_Y_time_counter <= '0;
                 for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
-                    ub_rd_Y_data_out[i] <= '0;
+                    ub_rd_Y_data_out_r[i] <= '0;
                 end
             end
 
@@ -442,10 +461,10 @@ module unified_buffer_nxn #(
                 rd_H_ptr_next = rd_H_ptr;  // BUG-UB-1 fix
                 for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
                     if(rd_H_time_counter >= i && rd_H_time_counter < rd_H_row_size + i && i < rd_H_col_size) begin
-                        ub_rd_H_data_out[i] <= ub_memory[rd_H_ptr_next];
+                        ub_rd_H_data_out_r[i] <= ub_memory[rd_H_ptr_next];
                         rd_H_ptr_next = rd_H_ptr_next + (rd_H_col_size - 1);
                     end else begin
-                        ub_rd_H_data_out[i] <= '0;
+                        ub_rd_H_data_out_r[i] <= '0;
                     end
                 end
                 rd_H_ptr_next = rd_H_ptr_next + descending_walk_correction(rd_H_col_size, rd_H_row_size, rd_H_time_counter);
@@ -457,7 +476,7 @@ module unified_buffer_nxn #(
                 rd_H_col_size <= 0;
                 rd_H_time_counter <= '0;
                 for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
-                    ub_rd_H_data_out[i] <= '0;
+                    ub_rd_H_data_out_r[i] <= '0;
                 end
             end
 

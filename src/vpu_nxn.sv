@@ -58,9 +58,18 @@ module vpu_nxn #(
     input logic [15:0] H_in [SYSTOLIC_ARRAY_WIDTH],             // For leaky relu derivative modules
 
     // Outputs to UB
-    output logic [15:0] vpu_data_out [SYSTOLIC_ARRAY_WIDTH],
-    output logic vpu_valid_out [SYSTOLIC_ARRAY_WIDTH]
+    output wire [15:0] vpu_data_out [SYSTOLIC_ARRAY_WIDTH],
+    output wire vpu_valid_out [SYSTOLIC_ARRAY_WIDTH]
 );
+
+    // BUG-TOOLS-1 (iverilog 11): variable unpacked-array
+    // output ports propagate X to connected parent nets; the
+    // public ports are wires assigned from these mirrors.
+    logic [15:0] vpu_data_out_r [SYSTOLIC_ARRAY_WIDTH];  // BUG-TOOLS-1 mirror
+    logic vpu_valid_out_r [SYSTOLIC_ARRAY_WIDTH];  // BUG-TOOLS-1 mirror
+
+    assign vpu_data_out = vpu_data_out_r;
+    assign vpu_valid_out = vpu_valid_out_r;
 
     localparam int N = SYSTOLIC_ARRAY_WIDTH;
     localparam int PAIRS = SYSTOLIC_ARRAY_WIDTH / 2;
@@ -149,7 +158,7 @@ module vpu_nxn #(
     logic signed [15:0] last_H_data_in_s [N];  // combinational input to H-cache register
     logic signed [15:0] last_H_data_out_s [N];
 
-    // BUG-VPU-1 fix: intermediate mux signals; vpu_data_out is registered in always_ff
+    // BUG-VPU-1 fix: intermediate mux signals; vpu_data_out_r is registered in always_ff
     logic signed [15:0] vpu_data_mux [N];
     logic               vpu_valid_mux [N];
 
@@ -526,13 +535,13 @@ module vpu_nxn #(
         if (rst) begin
             for (int k = 0; k < N; k++) begin
                 last_H_data_out_s[k] <= '0;
-                vpu_data_out[k]      <= '0;
-                vpu_valid_out[k]     <= '0;
+                vpu_data_out_r[k]      <= '0;
+                vpu_valid_out_r[k]     <= '0;
             end
         end else begin
             for (int k = 0; k < N; k++) begin
-                vpu_data_out[k]  <= vpu_data_mux[k];
-                vpu_valid_out[k] <= vpu_valid_mux[k];
+                vpu_data_out_r[k]  <= vpu_data_mux[k];
+                vpu_valid_out_r[k] <= vpu_valid_mux[k];
                 if (vpu_data_pathway[1]) begin
                     last_H_data_out_s[k] <= last_H_data_in_s[k];
                 end else begin

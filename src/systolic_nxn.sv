@@ -35,8 +35,8 @@ module systolic_nxn #(
     input logic [15:0] sys_data_in [SYSTOLIC_ARRAY_WIDTH],
     input logic sys_start_1,   // start signal for row 1; chained through the array
 
-    output logic [15:0] sys_data_out [SYSTOLIC_ARRAY_WIDTH],  // bottom-row psums, per column
-    output logic sys_valid_out [SYSTOLIC_ARRAY_WIDTH],
+    output wire [15:0] sys_data_out [SYSTOLIC_ARRAY_WIDTH],  // bottom-row psums, per column
+    output wire sys_valid_out [SYSTOLIC_ARRAY_WIDTH],
 
     // input signals from top of systolic array (one per column)
     input logic [15:0] sys_weight_in [SYSTOLIC_ARRAY_WIDTH],
@@ -47,6 +47,15 @@ module systolic_nxn #(
     input logic [15:0] ub_rd_col_size_in,
     input logic ub_rd_col_size_valid_in
 );
+
+    // BUG-TOOLS-1 (iverilog 11): variable unpacked-array
+    // output ports propagate X to connected parent nets; the
+    // public ports are wires assigned from these mirrors.
+    logic [15:0] sys_data_out_r [SYSTOLIC_ARRAY_WIDTH];  // BUG-TOOLS-1 mirror
+    logic sys_valid_out_r [SYSTOLIC_ARRAY_WIDTH];  // BUG-TOOLS-1 mirror
+
+    assign sys_data_out = sys_data_out_r;
+    assign sys_valid_out = sys_valid_out_r;
 
     // One-cycle input delay stage (see SWITCH vs FIRST BEAT above)
     logic [15:0] sys_data_in_q [SYSTOLIC_ARRAY_WIDTH];
@@ -125,8 +134,8 @@ module systolic_nxn #(
     // bottom-row outputs, one per column
     always_comb begin
         for (int c = 0; c < SYSTOLIC_ARRAY_WIDTH; c++) begin
-            sys_data_out[c]  = pe_psum_out[SYSTOLIC_ARRAY_WIDTH-1][c];
-            sys_valid_out[c] = pe_valid_out[SYSTOLIC_ARRAY_WIDTH-1][c];
+            sys_data_out_r[c]  = pe_psum_out[SYSTOLIC_ARRAY_WIDTH-1][c];
+            sys_valid_out_r[c] = pe_valid_out[SYSTOLIC_ARRAY_WIDTH-1][c];
         end
     end
 

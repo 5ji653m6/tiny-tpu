@@ -72,6 +72,26 @@ module unified_buffer_nxn #(
 
     logic [15:0] wr_ptr;
 
+    // BUG-UB-3: row-major VPU-stream writeback state. Beats (row r, col i)
+    // of a rows x w output stream arrive skewed (cycle base+r+i); the legacy
+    // arrival-order wr_ptr scheme only coincided with row-major at N=2, so at
+    // N>=3 stored matrices were wavefront-scrambled against every row-major
+    // read walk. Each beat lands at stream_base + r*w + i, where w is the
+    // active output width latched from the last weight (ptr-1) read.
+    logic [15:0] wr_stream_base;
+    logic [15:0] wr_stream_width;
+    // BUG-UB-4: the NEXT pass's weight-load (ptr-1) read can fire while the
+    // current pass's output stream is still draining (observed at N=2: the
+    // W2^T load relatched w=1 during the final H1 beat, misplacing it).
+    // Snapshot the width at stream start and use the snapshot for every
+    // beat of that stream (and its gradient writeback).
+    logic [15:0] wr_stream_width_snap;
+    logic        wr_stream_active_d;
+    logic [15:0] wr_beat_cnt [SYSTOLIC_ARRAY_WIDTH];
+    // Row-major weight-gradient writeback: done beat (r,i) of lane i updates
+    // ub_memory[grad_descent_ptr + r*w + i].
+    logic [15:0] grad_done_cnt [SYSTOLIC_ARRAY_WIDTH];
+
     // Internal logic for reading inputs from UB to left side of systolic array
     logic [15:0] rd_input_ptr;
     logic [15:0] rd_input_row_size;
@@ -141,7 +161,26 @@ module unified_buffer_nxn #(
     logic [15:0]        rd_Y_ptr_next;
     logic [15:0]        rd_H_ptr_next;
     logic [15:0]        rd_grad_weight_ptr_next;
-    logic [15:0]        grad_descent_ptr_next;
+    // BUG-UB-3: combinational stream base (wr_ptr on the first beat of a
+    // stream, the latched base afterwards).
+    logic [15:0]        wr_stream_base_comb;
+    // BUG-UB-4: effective stream width — the start-of-stream snapshot while
+    // a stream is active, the live latch otherwise (the first beat has
+    // beat_cnt == 0, so the width is only needed from the second beat on,
+    // when the snapshot is already in place).
+    logic [15:0]        wr_stream_w_eff;
+    // iverilog 11 cannot reduce an unpacked array with |, so the any-lane
+    // stream-valid flag is computed with an explicit loop.
+    logic               wr_any_valid;
+
+    always_comb begin
+        wr_any_valid = 1'b0;
+        for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
+            wr_any_valid = wr_any_valid | ub_wr_valid_in[i];
+        end
+        wr_stream_w_eff = wr_stream_active_d ? wr_stream_width_snap
+                                             : wr_stream_width;
+    end
 
     // Generalized shared-pointer walk helpers (valid for ANY column count C = 1..N,
     // not just C=2; bit-identical to the legacy +1 walks at C=2 / R'=2).
@@ -199,6 +238,16 @@ module unified_buffer_nxn #(
             ub_rd_col_size_valid_out <= (ub_rd_start_in && (ub_ptr_select == 9'd1));
             ub_rd_col_size_out       <= (ub_rd_start_in && (ub_ptr_select == 9'd1)) ?
                                         (ub_rd_transpose ? ub_rd_row_size : ub_rd_col_size) : 16'b0;
+        end
+    end
+
+    // BUG-UB-3: hold the active output width (the same value strobed out as
+    // ub_rd_col_size_out) for row-major stream/writeback addressing.
+    always_ff @(posedge clk or posedge rst) begin
+        if (rst) begin
+            wr_stream_width <= '0;
+        end else if (ub_rd_start_in && (ub_ptr_select == 9'd1)) begin
+            wr_stream_width <= ub_rd_transpose ? ub_rd_row_size : ub_rd_col_size;
         end
     end
 
@@ -276,30 +325,74 @@ module unified_buffer_nxn #(
             rd_grad_weight_time_counter <= '0;
             grad_bias_or_weight <= '0;
             grad_descent_ptr <= '0;
+
+            wr_stream_base <= '0;
+            wr_stream_width_snap <= '0;
+            wr_stream_active_d <= '0;
+            for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
+                wr_beat_cnt[i] <= '0;
+                grad_done_cnt[i] <= '0;
+            end
         end else begin
             // WRITING LOGIC
             // matrices are stored in row major format
             // if there are two columns, the first column will be stored at even indices and the second column will be stored at odd indices
-            // BUG-UB-2 note: loop decrements so channel[1] is at lower address than channel[0] (intentional row-major order)
+            // BUG-UB-2 note: host loop decrements so channel[1] is at lower address than channel[0] (intentional row-major order)
+            // BUG-UB-3: VPU output streams are also placed row-major — beat
+            // (row r, col i) of a rows x w stream lands at
+            // stream_base + r*w + i. Arrival-order placement only equaled
+            // row-major at N=2; at N>=3 the skewed wavefront scrambled the
+            // stored matrix against every row-major read walk.
+            wr_stream_base_comb = wr_stream_active_d ? wr_stream_base : wr_ptr;
             wr_ptr_next = wr_ptr;  // BUG-UB-1 fix: use _next variable; single <= at end
             for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin     // FOR LOOP SHOULD DECREMENT TO STORE IN ROW MAJOR ORDER!!!
                 if (ub_wr_valid_in[i]) begin
-                    ub_memory[wr_ptr_next] <= ub_wr_data_in[i];
-                    wr_ptr_next = wr_ptr_next + 1;
+                    ub_memory[wr_stream_base_comb + wr_beat_cnt[i]*wr_stream_w_eff + i] <= ub_wr_data_in[i];
                 end else if (ub_wr_host_valid_in[i]) begin
                     ub_memory[wr_ptr_next] <= ub_wr_host_data_in[i];
                     wr_ptr_next = wr_ptr_next + 1;
                 end
             end
-            wr_ptr <= wr_ptr_next;
+            if (ub_wr_valid_in[0]) begin
+                // lane 0 beats every cycle from stream start until its rows
+                // run out; keep wr_ptr one row past its latest beat so the
+                // next stream/host region starts right after this one.
+                wr_ptr <= wr_stream_base_comb + (wr_beat_cnt[0] + 1)*wr_stream_w_eff;
+            end else if (!wr_any_valid) begin
+                wr_ptr <= wr_ptr_next;
+            end
+            // (tail cycles: lane 0 done, lanes 1+ still draining — wr_ptr
+            // already holds the final value)
+
+            // stream bookkeeping: capture the base on the first beat of a
+            // stream, count beats per lane while active, clear when idle.
+            wr_stream_active_d <= wr_any_valid;
+            if (wr_any_valid && !wr_stream_active_d) begin
+                wr_stream_base <= wr_ptr;
+                wr_stream_width_snap <= wr_stream_width;  // BUG-UB-4
+            end
+            if (wr_any_valid) begin
+                for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
+                    if (ub_wr_valid_in[i]) begin
+                        wr_beat_cnt[i] <= wr_beat_cnt[i] + 1;
+                    end
+                end
+            end else begin
+                for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
+                    wr_beat_cnt[i] <= '0;
+                end
+            end
 
             //WRITING LOGIC (for gradient descent modules to UB)
-            grad_descent_ptr_next = grad_descent_ptr;  // BUG-UB-1 fix
             if (grad_bias_or_weight) begin
+                // BUG-UB-3: row-major writeback — done beat (r, i) of lane i
+                // updates ub_memory[grad_descent_ptr + r*w + i]. The legacy
+                // incrementing-pointer scheme wrote in skewed arrival order,
+                // which only equaled row-major at N=2.
                 for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
                     if (grad_descent_done_out[i]) begin
-                        ub_memory[grad_descent_ptr_next] <= value_updated_out[i];
-                        grad_descent_ptr_next = grad_descent_ptr_next + 1;
+                        ub_memory[grad_descent_ptr + grad_done_cnt[i]*wr_stream_w_eff + i] <= value_updated_out[i];
+                        grad_done_cnt[i] <= grad_done_cnt[i] + 1;
                     end
                 end
             end else begin
@@ -309,7 +402,6 @@ module unified_buffer_nxn #(
                     end
                 end
             end
-            grad_descent_ptr <= grad_descent_ptr_next;
 
             // READING LOGIC (for input from UB to left side of systolic array)
             if (rd_input_time_counter + 1 < rd_input_row_size + rd_input_col_size) begin
@@ -572,6 +664,9 @@ module unified_buffer_nxn #(
                         rd_grad_bias_time_counter <= '0;
                         grad_bias_or_weight <= 1'b0;
                         grad_descent_ptr <= ub_rd_addr_in;
+                        for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
+                            grad_done_cnt[i] <= '0;
+                        end
                     end
                     6: begin
                         rd_grad_weight_ptr <= ub_rd_addr_in;
@@ -580,6 +675,9 @@ module unified_buffer_nxn #(
                         rd_grad_weight_time_counter <= '0;
                         grad_bias_or_weight <= 1'b1;
                         grad_descent_ptr <= ub_rd_addr_in;
+                        for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
+                            grad_done_cnt[i] <= '0;
+                        end
                     end
                 endcase
             end

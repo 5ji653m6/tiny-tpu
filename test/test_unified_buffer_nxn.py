@@ -15,15 +15,18 @@ read walks deliver correct per-column streams only for TWO-column
 matrices (within-cycle lane step is skip=cols+1 and the end-of-cycle
 correction undoes exactly one lane's skip; with >2 active lanes the walk
 diverges from per-column delivery, and at 4x4 weights it even generates
-NEGATIVE addresses — the signed rd_weight_ptr is no accident). The
-real chip only ever streams 2-column matrices, so this is a legacy
-limitation, not an nxn bug; generalizing the N-column read SCHEDULE is
-future roadmap work. This test therefore uses cols=2 shapes (correct
-semantics at any N, valid addresses) for input/weight/Y/H, exercises the
-bias channel (per-lane fixed addressing — correct at any width) at full
-N, and asserts lanes >= cols stay SILENT. The expected sequences come
-from a Python model of the documented legacy read algorithms — the
-equivalence test anchors those algorithms to silicon at N=2.
+NEGATIVE addresses — the signed rd_weight_ptr is no accident). Since
+this test was written, roadmap items 5d-1a (weights) and 5d-1b
+(input/Y/H/grad_weight) GENERALIZED those walks in
+src/unified_buffer_nxn.sv to correct N-column delivery; every
+expectation here is unchanged EXCEPT transposed input — the one case
+where the legacy walk was exercised outside its correct regime (the
+legacy p++ scrambled the beats whenever the original matrix had >2
+columns; the generalized walk delivers row i, first element first).
+The remaining cols=2 shapes are bit-identical under the generalized
+walks by construction (the generalized corrections reduce to the legacy
+constants at C=2), and the equivalence test anchors that to silicon at
+N=2. Lanes >= cols are still asserted SILENT.
 
 Zero-filtering: bias/Y/H have no valid line and drive '0 outside their
 emission window; since every written word is nonzero, collecting nonzero
@@ -58,16 +61,30 @@ def model_lanes(mem, kind, addr, rows, cols, transpose=False):
 
     input/Y/H: lane i active while counter in [i, rows+i) and i < cols,
       walking the pointer +1 per read (loop order N-1..0, or 0..N-1 for
-      transposed input). input transpose swaps row/col sizes on latch.
+      transposed input — see the corrected-semantics branch below).
+      input transpose swaps row/col sizes on latch.
     weight: pointer steps by -skip (untransposed) or +skip (transposed)
       per read, skip = ORIGINAL cols + 1, with a +-skip-+1 correction at
       the end of each cycle; start pointer per the legacy case block.
     bias: fixed base pointer, lane i reads mem[addr+i] during its window
       (no transpose handling, incrementing loop).
     """
-    eff_rows, eff_cols = rows, cols
     if kind == "input" and transpose:
-        eff_rows, eff_cols = cols, rows
+        # Item 5d-1b corrected walk: lane i (i < original rows) streams
+        # ROW i of the original matrix, FIRST element first — beat k at
+        # cycle t = i+k carries mem[addr + i*cols + k]. The legacy p++
+        # walk scrambled this whenever original cols > 2 (the same
+        # C=2-only coincidence as the weight walk's C^2 == C+2).
+        lanes = [[] for _ in range(N)]
+        eff_rows, eff_cols = cols, rows      # latched: R' = orig cols, C' = orig rows
+        t = 0
+        while t + 1 < eff_rows + eff_cols:
+            for i in range(N):               # incrementing loop
+                if t >= i and t < eff_rows + i and i < eff_cols:
+                    lanes[i].append(mem[addr + i * cols + (t - i)])
+            t += 1
+        return lanes
+    eff_rows, eff_cols = rows, cols
     if kind == "weight":
         skip = cols + 1                     # original cols, per RTL
         if transpose:
@@ -234,6 +251,8 @@ async def test_unified_buffer_nxn(dut):
     check(lanes, mem, "input", addr=0, rows=4, cols=2, transpose=False)
 
     # Input read (transposed): 2x4 command latches as 4 rows x 2 cols.
+    # 5d-1b: expects the CORRECTED delivery (lane i = row i, first
+    # element first) — the legacy walk scrambled these beats.
     await read_cmd(dut, 0, addr=0, rows=2, cols=4, transpose=1)
     await tick(dut, 4 + 2 * N + 6)
     check(lanes, mem, "input", addr=0, rows=2, cols=4, transpose=True)

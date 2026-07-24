@@ -160,6 +160,12 @@ test_unified_buffer_ncol_n4: $(SIM_BUILD_DIR)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv unified_buffer_nxn.vcd waveforms/unified_buffer_ncol_n4.vcd 2>/dev/null || true
 
+test_unified_buffer_ncol_streams_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=4 $(SOURCES) test/dump_unified_buffer_nxn.sv
+	PYTHONOPTIMIZE=$(NOASSERT) UB_NXN_N=4 MODULE=test_unified_buffer_ncol_streams $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv unified_buffer_nxn.vcd waveforms/unified_buffer_ncol_streams_n4.vcd 2>/dev/null || true
+
 test_nn: $(SIM_BUILD_DIR)
 	$(IVERILOG) -o $(SIM_VVP) -s nn -s dump -g2012 $(SOURCES) test/dump_nn.sv
 	PYTHONOPTIMIZE=$(NOASSERT) MODULE=test_nn $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)

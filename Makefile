@@ -61,7 +61,8 @@ SOURCES = src/pe.sv \
 		  src/tpu_nxn.sv \
 		  src/layernorm_group_nxn.sv \
 		  src/softmax_group_nxn.sv \
-		  src/control_unit_nxn.sv
+		  src/control_unit_nxn.sv \
+		  src/tpu_nxn_ic.sv
 
 # MODIFY 1) variable next to -s 
 # MODIFY 2) variable next to $(SOURCES)

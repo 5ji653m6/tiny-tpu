@@ -392,3 +392,13 @@ test_control_unit_nxn_n4: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) CU_NXN_N=4 MODULE=test_control_unit_nxn $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv control_unit_nxn.vcd waveforms/control_unit_nxn_n4.vcd 2>/dev/null || true
+
+# Instruction-driven full-chip training replay at N=4 (item 8b;
+# agent-authored RTL, harness-authored gate test). NOTE: src/tpu_nxn_ic.sv
+# is deliberately NOT in the SOURCES list until the loop lands it — the
+# loop compiles all of src/*.sv via its command-line SOURCES override.
+test_tpu_nxn_ic_train_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=4 $(SOURCES) test/dump_tpu_nxn_ic.sv
+	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_IC_N=4 MODULE=test_tpu_nxn_ic_train_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv tpu_nxn_ic.vcd waveforms/tpu_nxn_ic_train_n4.vcd 2>/dev/null || true

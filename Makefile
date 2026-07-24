@@ -55,7 +55,8 @@ SOURCES = src/pe.sv \
 		  src/gelu_parent.sv \
 		  src/layernorm_parent.sv \
 		  src/softmax_parent.sv \
-		  src/systolic_nxn.sv
+		  src/systolic_nxn.sv \
+		  src/unified_buffer_nxn.sv
 
 # MODIFY 1) variable next to -s 
 # MODIFY 2) variable next to $(SOURCES)
@@ -97,6 +98,30 @@ test_systolic_nxn: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) SYSTOLIC_NXN_N=2 MODULE=test_systolic_nxn $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv systolic_nxn.vcd waveforms/ 2>/dev/null || true
+
+# Roadmap item 5b: unified buffer with per-lane array read ports
+# (src/unified_buffer_nxn.sv), gate tests authored harness-side.
+# _equiv: legacy and nxn instances driven in lockstep at N=2, compared
+# cycle-by-cycle (the legacy module is the spec). _n4: exact per-lane
+# read sequences at N=4 via iverilog -P override (UB_NXN_N tells the
+# cocotb test the compiled width). Also run plain at the default N=2.
+test_unified_buffer_nxn_equiv: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 $(SOURCES) test/dump_ub_nxn_equiv.sv
+	PYTHONOPTIMIZE=$(NOASSERT) MODULE=test_unified_buffer_nxn_equiv $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv unified_buffer_nxn_equiv.vcd waveforms/ 2>/dev/null || true
+
+test_unified_buffer_nxn: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 $(SOURCES) test/dump_unified_buffer_nxn.sv
+	PYTHONOPTIMIZE=$(NOASSERT) UB_NXN_N=2 MODULE=test_unified_buffer_nxn $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv unified_buffer_nxn.vcd waveforms/ 2>/dev/null || true
+
+test_unified_buffer_nxn_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=4 $(SOURCES) test/dump_unified_buffer_nxn.sv
+	PYTHONOPTIMIZE=$(NOASSERT) UB_NXN_N=4 MODULE=test_unified_buffer_nxn $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv unified_buffer_nxn.vcd waveforms/unified_buffer_nxn_n4.vcd 2>/dev/null || true
 
 test_nn: $(SIM_BUILD_DIR)
 	$(IVERILOG) -o $(SIM_VVP) -s nn -s dump -g2012 $(SOURCES) test/dump_nn.sv

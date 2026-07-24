@@ -149,6 +149,17 @@ test_vpu_nxn_n4: $(SIM_BUILD_DIR)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv vpu_nxn.vcd waveforms/vpu_nxn_n4.vcd 2>/dev/null || true
 
+# Roadmap item 5d-1a: N-column weight read schedule (generalized
+# shared-pointer walk in src/unified_buffer_nxn.sv). Exact per-lane
+# delivery at N=4 for 4x4 (R/T), 4x2, 4x3, 4x1 and 2x4T shapes, modeled
+# by target semantics (per-column streams), not walk internals. The 5b
+# tests anchor the C<=2 behavior bit-exactly.
+test_unified_buffer_ncol_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=4 $(SOURCES) test/dump_unified_buffer_nxn.sv
+	PYTHONOPTIMIZE=$(NOASSERT) UB_NXN_N=4 MODULE=test_unified_buffer_ncol $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv unified_buffer_nxn.vcd waveforms/unified_buffer_ncol_n4.vcd 2>/dev/null || true
+
 test_nn: $(SIM_BUILD_DIR)
 	$(IVERILOG) -o $(SIM_VVP) -s nn -s dump -g2012 $(SOURCES) test/dump_nn.sv
 	PYTHONOPTIMIZE=$(NOASSERT) MODULE=test_nn $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)

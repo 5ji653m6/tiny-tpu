@@ -8,23 +8,26 @@
 // during the transition pathway we need to store the H matrices that come out of the leaky relu modules AND pass them to the loss modules
 
 /* 
-|ln control bit| |gelu control bit| |bias control bit| |lr control bit| |loss control bit| |lr_d control bit|
+vpu_data_pathway is 7 bits: |sm(6)| |ln(5)| |gelu(4)| |bias(3)| |lr(2)| |loss(1)| |lr_d(0)|
 
-000000: activate no modules
-001100: forward pass pathway (sys --> bias --> leaky relu --> output)
-001111: transistion pathway (sys --> bias --> leaky relu --> loss --> leaky relu derivative --> output)
-000001: backward pass pathway (sys --> leaky relu derivative --> output)
-01xxxx: gelu stage enabled (inserted between leaky relu and layernorm; bit 4 = 0 bypasses it)
-1xxxxx: layernorm stage enabled (inserted between gelu and loss; bit 5 = 0 bypasses it)
+0000000: activate no modules
+0001100: forward pass pathway (sys --> bias --> leaky relu --> output)
+0001111: transistion pathway (sys --> bias --> leaky relu --> loss --> leaky relu derivative --> output)
+0000001: backward pass pathway (sys --> leaky relu derivative --> output)
+001xxxx: gelu stage enabled (inserted between leaky relu and layernorm; bit 4 = 0 bypasses it)
+01xxxxx: layernorm stage enabled (inserted between gelu and softmax; bit 5 = 0 bypasses it)
         normalizes each 2-lane beat: mean = (x1+x2)/2, var = ((x1-mean)^2+(x2-mean)^2)/2,
         y_i = (x_i - mean) / sqrt(var + eps)
+1xxxxxx: softmax stage enabled (inserted between layernorm and loss; bit 6 = 0 bypasses it)
+        normalizes each 2-lane beat: y_i = exp(x_i) / (exp(x_1) + exp(x_2)),
+        computed in numerically stable logistic form y_1 = sigmoid(x_1 - x_2), y_2 = 1 - y_1
 */
 
 module vpu (
     input logic clk,
     input logic rst,
 
-    input logic [5:0] vpu_data_pathway, // 6-bits to signify which modules to route the inputs to (1 bit for each module; bit 4 = gelu, bit 5 = layernorm)
+    input logic [6:0] vpu_data_pathway, // 7-bits to signify which modules to route the inputs to (1 bit for each module; bit 4 = gelu, bit 5 = layernorm, bit 6 = softmax)
 
     // Inputs from systolic array
     input logic signed [15:0] vpu_data_in_1,
@@ -112,6 +115,22 @@ module vpu (
     logic ln_to_loss_valid_in_1;
     logic signed [15:0] ln_to_loss_data_in_2;
     logic ln_to_loss_valid_in_2;
+
+    // softmax
+    logic signed [15:0] sm_data_1_in;
+    logic sm_valid_1_in;
+    logic signed [15:0] sm_data_2_in;
+    logic sm_valid_2_in;
+    logic signed [15:0] sm_data_1_out;
+    logic sm_valid_1_out;
+    logic signed [15:0] sm_data_2_out;
+    logic sm_valid_2_out;
+
+    // softmax to loss intermediate values
+    logic signed [15:0] sm_to_loss_data_in_1;
+    logic sm_to_loss_valid_in_1;
+    logic signed [15:0] sm_to_loss_data_in_2;
+    logic sm_to_loss_valid_in_2;
 
     // loss
     logic signed [15:0] loss_data_1_in; 
@@ -227,6 +246,23 @@ module vpu (
         .ln_overflow_out_2()
     );
 
+    softmax_parent softmax_parent_inst (
+        .clk(clk),
+        .rst(rst),
+
+        .sm_data_1_in(sm_data_1_in),
+        .sm_data_2_in(sm_data_2_in),
+        .sm_valid_1_in(sm_valid_1_in),
+        .sm_valid_2_in(sm_valid_2_in),
+
+        .sm_data_1_out(sm_data_1_out),
+        .sm_data_2_out(sm_data_2_out),
+        .sm_valid_1_out(sm_valid_1_out),
+        .sm_valid_2_out(sm_valid_2_out),
+        .sm_overflow_out_1(),   // BUG-OVF-1: observable via hierarchical reference
+        .sm_overflow_out_2()
+    );
+
     loss_parent loss_parent_inst (
         .clk(clk),
         .rst(rst),
@@ -286,6 +322,10 @@ module vpu (
         ln_to_loss_data_in_2  = 16'b0;
         ln_to_loss_valid_in_1 = 1'b0;
         ln_to_loss_valid_in_2 = 1'b0;
+        sm_to_loss_data_in_1  = 16'b0;
+        sm_to_loss_data_in_2  = 16'b0;
+        sm_to_loss_valid_in_1 = 1'b0;
+        sm_to_loss_valid_in_2 = 1'b0;
         loss_to_lrd_data_in_1  = 16'b0;
         loss_to_lrd_data_in_2  = 16'b0;
         loss_to_lrd_valid_in_1 = 1'b0;
@@ -318,6 +358,10 @@ module vpu (
             ln_data_2_in = 16'b0;
             ln_valid_1_in = 1'b0;
             ln_valid_2_in = 1'b0;
+            sm_data_1_in = 16'b0;
+            sm_data_2_in = 16'b0;
+            sm_valid_1_in = 1'b0;
+            sm_valid_2_in = 1'b0;
             loss_data_1_in = 16'b0;
             loss_data_2_in = 16'b0;
             loss_valid_1_in = 1'b0;
@@ -436,13 +480,40 @@ module vpu (
                 ln_to_loss_valid_in_2 = gelu_to_loss_valid_in_2;
             end
 
+            // softmax module
+            if(vpu_data_pathway[6]) begin
+                // connect softmax inputs to intermediate values
+                sm_data_1_in = ln_to_loss_data_in_1;
+                sm_data_2_in = ln_to_loss_data_in_2;
+                sm_valid_1_in = ln_to_loss_valid_in_1;
+                sm_valid_2_in = ln_to_loss_valid_in_2;
+
+                // connect softmax outputs to intermediate values
+                sm_to_loss_data_in_1 = sm_data_1_out;
+                sm_to_loss_data_in_2 = sm_data_2_out;
+                sm_to_loss_valid_in_1 = sm_valid_1_out;
+                sm_to_loss_valid_in_2 = sm_valid_2_out;
+            end else begin
+                // disable inputs
+                sm_data_1_in = 16'b0;
+                sm_data_2_in = 16'b0;
+                sm_valid_1_in = 1'b0;
+                sm_valid_2_in = 1'b0;
+
+                // bypass: connect intermediate values to each other
+                sm_to_loss_data_in_1 = ln_to_loss_data_in_1;
+                sm_to_loss_data_in_2 = ln_to_loss_data_in_2;
+                sm_to_loss_valid_in_1 = ln_to_loss_valid_in_1;
+                sm_to_loss_valid_in_2 = ln_to_loss_valid_in_2;
+            end
+
             // loss module
             if(vpu_data_pathway[1]) begin
                 // connect loss inputs to intermediate values
-                loss_data_1_in = ln_to_loss_data_in_1;
-                loss_data_2_in = ln_to_loss_data_in_2;
-                loss_valid_1_in = ln_to_loss_valid_in_1;
-                loss_valid_2_in = ln_to_loss_valid_in_2;
+                loss_data_1_in = sm_to_loss_data_in_1;
+                loss_data_2_in = sm_to_loss_data_in_2;
+                loss_valid_1_in = sm_to_loss_valid_in_1;
+                loss_valid_2_in = sm_to_loss_valid_in_2;
 
                 // connect loss outputs to intermediate values
                 loss_to_lrd_data_in_1 = loss_data_1_out;
@@ -463,10 +534,10 @@ module vpu (
                 loss_valid_2_in = 1'b0;
 
                 // connect intermediate values to each other
-                loss_to_lrd_data_in_1 = ln_to_loss_data_in_1;
-                loss_to_lrd_data_in_2 = ln_to_loss_data_in_2;
-                loss_to_lrd_valid_in_1 = ln_to_loss_valid_in_1;
-                loss_to_lrd_valid_in_2 = ln_to_loss_valid_in_2;
+                loss_to_lrd_data_in_1 = sm_to_loss_data_in_1;
+                loss_to_lrd_data_in_2 = sm_to_loss_data_in_2;
+                loss_to_lrd_valid_in_1 = sm_to_loss_valid_in_1;
+                loss_to_lrd_valid_in_2 = sm_to_loss_valid_in_2;
 
                 // BUG-VPU-2 fix: clear last_H cache inputs when loss is not active
                 last_H_data_1_in = 16'b0;

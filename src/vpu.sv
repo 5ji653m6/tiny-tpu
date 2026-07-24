@@ -8,19 +8,23 @@
 // during the transition pathway we need to store the H matrices that come out of the leaky relu modules AND pass them to the loss modules
 
 /* 
-|bias control bit| |lr control bit| |loss control bit| |lr_d control bit|
+|ln control bit| |gelu control bit| |bias control bit| |lr control bit| |loss control bit| |lr_d control bit|
 
-0000: activate no modules
-1100: forward pass pathway (sys --> bias --> leaky relu --> output)
-1111: transistion pathway (sys --> bias --> leaky relu --> loss --> leaky relu derivative --> output)
-0001: backward pass pathway (sys --> leaky relu derivative --> output)
+000000: activate no modules
+001100: forward pass pathway (sys --> bias --> leaky relu --> output)
+001111: transistion pathway (sys --> bias --> leaky relu --> loss --> leaky relu derivative --> output)
+000001: backward pass pathway (sys --> leaky relu derivative --> output)
+01xxxx: gelu stage enabled (inserted between leaky relu and layernorm; bit 4 = 0 bypasses it)
+1xxxxx: layernorm stage enabled (inserted between gelu and loss; bit 5 = 0 bypasses it)
+        normalizes each 2-lane beat: mean = (x1+x2)/2, var = ((x1-mean)^2+(x2-mean)^2)/2,
+        y_i = (x_i - mean) / sqrt(var + eps)
 */
 
 module vpu (
     input logic clk,
     input logic rst,
 
-    input logic [3:0] vpu_data_pathway, // 4-bits to signify which modules to route the inputs to (1 bit for each module)
+    input logic [5:0] vpu_data_pathway, // 6-bits to signify which modules to route the inputs to (1 bit for each module; bit 4 = gelu, bit 5 = layernorm)
 
     // Inputs from systolic array
     input logic signed [15:0] vpu_data_in_1,
@@ -76,6 +80,38 @@ module vpu (
     logic lr_to_loss_valid_in_1;
     logic signed [15:0] lr_to_loss_data_in_2;
     logic lr_to_loss_valid_in_2;
+
+    // gelu
+    logic signed [15:0] gelu_data_1_in;
+    logic gelu_valid_1_in;
+    logic signed [15:0] gelu_data_2_in;
+    logic gelu_valid_2_in;
+    logic signed [15:0] gelu_data_1_out;
+    logic gelu_valid_1_out;
+    logic signed [15:0] gelu_data_2_out;
+    logic gelu_valid_2_out;
+
+    // gelu to loss intermediate values
+    logic signed [15:0] gelu_to_loss_data_in_1;
+    logic gelu_to_loss_valid_in_1;
+    logic signed [15:0] gelu_to_loss_data_in_2;
+    logic gelu_to_loss_valid_in_2;
+
+    // layernorm
+    logic signed [15:0] ln_data_1_in;
+    logic ln_valid_1_in;
+    logic signed [15:0] ln_data_2_in;
+    logic ln_valid_2_in;
+    logic signed [15:0] ln_data_1_out;
+    logic ln_valid_1_out;
+    logic signed [15:0] ln_data_2_out;
+    logic ln_valid_2_out;
+
+    // layernorm to loss intermediate values
+    logic signed [15:0] ln_to_loss_data_in_1;
+    logic ln_to_loss_valid_in_1;
+    logic signed [15:0] ln_to_loss_data_in_2;
+    logic ln_to_loss_valid_in_2;
 
     // loss
     logic signed [15:0] loss_data_1_in; 
@@ -157,6 +193,40 @@ module vpu (
         .lr_overflow_out_2()
     );
 
+    gelu_parent gelu_parent_inst (
+        .clk(clk),
+        .rst(rst),
+
+        .gelu_data_1_in(gelu_data_1_in),
+        .gelu_data_2_in(gelu_data_2_in),
+        .gelu_valid_1_in(gelu_valid_1_in),
+        .gelu_valid_2_in(gelu_valid_2_in),
+
+        .gelu_data_1_out(gelu_data_1_out),
+        .gelu_data_2_out(gelu_data_2_out),
+        .gelu_valid_1_out(gelu_valid_1_out),
+        .gelu_valid_2_out(gelu_valid_2_out),
+        .gelu_overflow_out_1(),   // BUG-OVF-1: observable via hierarchical reference
+        .gelu_overflow_out_2()
+    );
+
+    layernorm_parent layernorm_parent_inst (
+        .clk(clk),
+        .rst(rst),
+
+        .ln_data_1_in(ln_data_1_in),
+        .ln_data_2_in(ln_data_2_in),
+        .ln_valid_1_in(ln_valid_1_in),
+        .ln_valid_2_in(ln_valid_2_in),
+
+        .ln_data_1_out(ln_data_1_out),
+        .ln_data_2_out(ln_data_2_out),
+        .ln_valid_1_out(ln_valid_1_out),
+        .ln_valid_2_out(ln_valid_2_out),
+        .ln_overflow_out_1(),   // BUG-OVF-1: observable via hierarchical reference
+        .ln_overflow_out_2()
+    );
+
     loss_parent loss_parent_inst (
         .clk(clk),
         .rst(rst),
@@ -208,6 +278,14 @@ module vpu (
         lr_to_loss_data_in_2  = 16'b0;
         lr_to_loss_valid_in_1 = 1'b0;
         lr_to_loss_valid_in_2 = 1'b0;
+        gelu_to_loss_data_in_1  = 16'b0;
+        gelu_to_loss_data_in_2  = 16'b0;
+        gelu_to_loss_valid_in_1 = 1'b0;
+        gelu_to_loss_valid_in_2 = 1'b0;
+        ln_to_loss_data_in_1  = 16'b0;
+        ln_to_loss_data_in_2  = 16'b0;
+        ln_to_loss_valid_in_1 = 1'b0;
+        ln_to_loss_valid_in_2 = 1'b0;
         loss_to_lrd_data_in_1  = 16'b0;
         loss_to_lrd_data_in_2  = 16'b0;
         loss_to_lrd_valid_in_1 = 1'b0;
@@ -232,6 +310,14 @@ module vpu (
             lr_data_2_in = 16'b0;
             lr_valid_1_in = 1'b0;
             lr_valid_2_in = 1'b0;
+            gelu_data_1_in = 16'b0;
+            gelu_data_2_in = 16'b0;
+            gelu_valid_1_in = 1'b0;
+            gelu_valid_2_in = 1'b0;
+            ln_data_1_in = 16'b0;
+            ln_data_2_in = 16'b0;
+            ln_valid_1_in = 1'b0;
+            ln_valid_2_in = 1'b0;
             loss_data_1_in = 16'b0;
             loss_data_2_in = 16'b0;
             loss_valid_1_in = 1'b0;
@@ -296,13 +382,67 @@ module vpu (
                 lr_to_loss_valid_in_2 = b_to_lr_valid_in_2;
             end
 
+            // gelu module
+            if(vpu_data_pathway[4]) begin
+                // connect gelu inputs to intermediate values
+                gelu_data_1_in = lr_to_loss_data_in_1;
+                gelu_data_2_in = lr_to_loss_data_in_2;
+                gelu_valid_1_in = lr_to_loss_valid_in_1;
+                gelu_valid_2_in = lr_to_loss_valid_in_2;
+
+                // connect gelu outputs to intermediate values
+                gelu_to_loss_data_in_1 = gelu_data_1_out;
+                gelu_to_loss_data_in_2 = gelu_data_2_out;
+                gelu_to_loss_valid_in_1 = gelu_valid_1_out;
+                gelu_to_loss_valid_in_2 = gelu_valid_2_out;
+            end else begin
+                // disable inputs
+                gelu_data_1_in = 16'b0;
+                gelu_data_2_in = 16'b0;
+                gelu_valid_1_in = 1'b0;
+                gelu_valid_2_in = 1'b0;
+
+                // bypass: connect intermediate values to each other
+                gelu_to_loss_data_in_1 = lr_to_loss_data_in_1;
+                gelu_to_loss_data_in_2 = lr_to_loss_data_in_2;
+                gelu_to_loss_valid_in_1 = lr_to_loss_valid_in_1;
+                gelu_to_loss_valid_in_2 = lr_to_loss_valid_in_2;
+            end
+
+            // layernorm module
+            if(vpu_data_pathway[5]) begin
+                // connect layernorm inputs to intermediate values
+                ln_data_1_in = gelu_to_loss_data_in_1;
+                ln_data_2_in = gelu_to_loss_data_in_2;
+                ln_valid_1_in = gelu_to_loss_valid_in_1;
+                ln_valid_2_in = gelu_to_loss_valid_in_2;
+
+                // connect layernorm outputs to intermediate values
+                ln_to_loss_data_in_1 = ln_data_1_out;
+                ln_to_loss_data_in_2 = ln_data_2_out;
+                ln_to_loss_valid_in_1 = ln_valid_1_out;
+                ln_to_loss_valid_in_2 = ln_valid_2_out;
+            end else begin
+                // disable inputs
+                ln_data_1_in = 16'b0;
+                ln_data_2_in = 16'b0;
+                ln_valid_1_in = 1'b0;
+                ln_valid_2_in = 1'b0;
+
+                // bypass: connect intermediate values to each other
+                ln_to_loss_data_in_1 = gelu_to_loss_data_in_1;
+                ln_to_loss_data_in_2 = gelu_to_loss_data_in_2;
+                ln_to_loss_valid_in_1 = gelu_to_loss_valid_in_1;
+                ln_to_loss_valid_in_2 = gelu_to_loss_valid_in_2;
+            end
+
             // loss module
             if(vpu_data_pathway[1]) begin
                 // connect loss inputs to intermediate values
-                loss_data_1_in = lr_to_loss_data_in_1;
-                loss_data_2_in = lr_to_loss_data_in_2;
-                loss_valid_1_in = lr_to_loss_valid_in_1;
-                loss_valid_2_in = lr_to_loss_valid_in_2;
+                loss_data_1_in = ln_to_loss_data_in_1;
+                loss_data_2_in = ln_to_loss_data_in_2;
+                loss_valid_1_in = ln_to_loss_valid_in_1;
+                loss_valid_2_in = ln_to_loss_valid_in_2;
 
                 // connect loss outputs to intermediate values
                 loss_to_lrd_data_in_1 = loss_data_1_out;
@@ -323,10 +463,10 @@ module vpu (
                 loss_valid_2_in = 1'b0;
 
                 // connect intermediate values to each other
-                loss_to_lrd_data_in_1 = lr_to_loss_data_in_1;
-                loss_to_lrd_data_in_2 = lr_to_loss_data_in_2;
-                loss_to_lrd_valid_in_1 = lr_to_loss_valid_in_1;
-                loss_to_lrd_valid_in_2 = lr_to_loss_valid_in_2;
+                loss_to_lrd_data_in_1 = ln_to_loss_data_in_1;
+                loss_to_lrd_data_in_2 = ln_to_loss_data_in_2;
+                loss_to_lrd_valid_in_1 = ln_to_loss_valid_in_1;
+                loss_to_lrd_valid_in_2 = ln_to_loss_valid_in_2;
 
                 // BUG-VPU-2 fix: clear last_H cache inputs when loss is not active
                 last_H_data_1_in = 16'b0;

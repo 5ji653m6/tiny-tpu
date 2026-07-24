@@ -12,22 +12,30 @@ THIS test proves the parameterization itself at N:
      (lane k leads lane k+1 by one cycle). Expected per-lane output
      sequences are exact integers (out = in, out = in + bias_scalar), so a
      lane-indexing or port-mapping mistake fails outright.
-  2. GROUP STAGES, SEMANTIC: layernorm and softmax are 2-lane math; at N
-     they must operate PER LANE PAIR (2p, 2p+1) with per-pair BUG-SKEW-1
-     alignment. Two discriminators that need no fixed-point golden model:
-       - PAIR ISOLATION: drive only pair 0; lanes 2..N-1 must stay SILENT
-         (a mistakenly N-wide group stage would stall waiting for all N
-         lanes, or bleed across pairs).
+  2. GROUP STAGES, SEMANTIC: the group stage (layernorm, softmax) is
+     N-dependent (roadmap item 7b): at N=2 it is the legacy 2-lane pair
+     module (bit-identity with vpu.sv); at N>2 it is a single N-wide
+     layernorm_group_nxn / softmax_group_nxn instance with full de-skew
+     (lane k delayed N-1-k at the input) and re-skew (lane k delayed k at
+     the output). Three discriminators:
        - SKEW PRESERVATION: with all lanes streaming on the native skew,
          each lane's first valid output must be strictly later than the
-         previous lane's (the re-skew registers restore the one-cycle
-         column skew per pair).
-     The math itself is anchored by the N=2 equivalence test.
+         previous lane's (the re-skew restores the one-cycle column skew).
+       - GROUP SEMANTICS: at N=2, driving only pair 0 leaves lanes 2..N-1
+         silent (pair isolation); at N>2, driving a PARTIAL group (only
+         pair 0) must stall ALL lanes — the N-wide stage's all-valid
+         handshake waits for every lane.
+       - VALUES (N>2): distinct constant vectors per beat through the full
+         de-skew/group/re-skew path, compared against the exact group
+         models from test_layernorm_group_nxn / test_softmax_group_nxn —
+         a de-skew misalignment would mix beats and fail outright.
+     The N=2 math itself is anchored by the N=2 equivalence test.
 
 Unlike the upstream tests, the asserts here are LIVE — PYTHONOPTIMIZE is
 empty (NOASSERT is never defined), so they fire.
 """
 
+import math
 import os
 
 import cocotb
@@ -44,6 +52,43 @@ PW_LN = 0b0100000
 PW_SM = 0b1000000
 
 armed = False
+
+FRAC_BITS = 8
+LSB = 1.0 / (1 << FRAC_BITS)
+LN_TOL = 12 * LSB  # matches test_layernorm_group_nxn
+SM_TOL = 4 * LSB   # matches test_softmax_group_nxn
+
+EXP_LUT = [round(256 * math.exp(-0.25 * k)) for k in range(33)]
+
+
+def exp_lut_exact(e_raw):
+    """The N-wide softmax leaf's piecewise-linear exp(-|e|) on a raw Q8.8
+    magnitude, with the RTL's exact integer arithmetic (see
+    test_softmax_group_nxn.py)."""
+    if e_raw >= 2048:
+        return 0
+    seg = e_raw >> 6
+    frac = e_raw & 0x3F
+    slope = EXP_LUT[seg + 1] - EXP_LUT[seg]
+    return EXP_LUT[seg] + ((slope * frac + 32) >> 6)
+
+
+def softmax_group_spec(xs):
+    """N-wide softmax on Q8.8 integer inputs -> float lanes."""
+    m = max(xs)
+    exps = [exp_lut_exact(m - x) for x in xs]
+    total = sum(exps)
+    return [e / total for e in exps]
+
+
+def layernorm_group_spec(xs):
+    """N-wide layernorm on Q8.8 integer inputs -> float lanes. The mean
+    replicates the RTL's truncating arithmetic shift exactly."""
+    mean_raw = sum(xs) >> (len(xs).bit_length() - 1)  # truncating shift
+    devs = [(x - mean_raw) / (1 << FRAC_BITS) for x in xs]
+    var = sum(d * d for d in devs) / len(xs)
+    std = math.sqrt(var + 1.0 / 16)
+    return [d / std for d in devs]
 
 
 async def tick(dut, cycles=1):
@@ -164,11 +209,11 @@ async def test_vpu_nxn(dut):
     await stream(dut, PW_BIAS_LR, data, nbeats)
     check_seq(col, expected, "bias+lr (nonneg)")
 
-    # ---- 4. group stages: skew preservation + pair isolation ----------
+    # ---- 4. group stages: skew preservation + group semantics ---------
     for pathway, name in ((PW_LN, "layernorm"), (PW_SM, "softmax")):
         # 4a. all lanes streaming on the native skew: every lane must emit
         # nbeats, and first-valid cycles must strictly increase with lane
-        # index (per-pair align + re-skew restores the column skew).
+        # index (the re-skew restores the column skew).
         gdata = [[0x0100 + 0x0080 * k for _ in range(nbeats)]
                  for k in range(N)]
         await stream(dut, pathway, gdata, nbeats)
@@ -184,20 +229,66 @@ async def test_vpu_nxn(dut):
                     f"{col.first_cycle[i - 1]} — re-skew broken")
         col.clear()
 
-        # 4b. pair isolation: drive ONLY lanes 0,1. Lanes 2..N-1 must stay
-        # silent — the group stage works per pair, not across all N lanes.
+        # 4b. group semantics: at N=2 the stage is the legacy pair module,
+        # so driving only pair 0 is a complete group and emits; at N>2
+        # the stage is a single N-wide group, so a partial group (only
+        # pair 0 driven) must stall ALL lanes (all-valid handshake).
         await stream(dut, pathway, gdata, nbeats, lanes=[0, 1])
-        assert len(col.beats[0]) == nbeats and len(col.beats[1]) == nbeats, (
-            f"{name} pair isolation: pair 0 emitted "
-            f"{len(col.beats[0])}/{len(col.beats[1])} beats, "
-            f"expected {nbeats}/{nbeats}")
-        for i in range(2, N):
-            assert col.beats[i] == [], (
-                f"{name} pair isolation: lane {i} emitted "
-                f"{col.beats[i]} with only pair 0 driven — group stage "
-                f"spans more than one lane pair")
+        if N == 2:
+            assert (len(col.beats[0]) == nbeats
+                    and len(col.beats[1]) == nbeats), (
+                f"{name} pair isolation: pair 0 emitted "
+                f"{len(col.beats[0])}/{len(col.beats[1])} beats, "
+                f"expected {nbeats}/{nbeats}")
+            for i in range(2, N):
+                assert col.beats[i] == [], (
+                    f"{name} pair isolation: lane {i} emitted "
+                    f"{col.beats[i]} with only pair 0 driven — group "
+                    f"stage spans more than one lane pair")
+        else:
+            for i in range(N):
+                assert col.beats[i] == [], (
+                    f"{name} group stall: lane {i} emitted "
+                    f"{col.beats[i]} with only lanes 0,1 driven — the "
+                    f"N-wide group stage must wait for ALL {N} lanes")
         col.clear()
+
+    # ---- 4c. group stage VALUES at N=4 (de-skew/re-skew alignment) ----
+    # Distinct constant vector per beat; a de-skew misalignment would mix
+    # beats and diverge from the exact N-wide models far beyond tolerance.
+    # (Vectors are length-4; extend when the gate grows past N=4.)
+    if N == 4:
+        for pathway, name, spec, vecs, tol in (
+            (PW_LN, "layernorm", layernorm_group_spec,
+             [(0x0300, 0x0100, -0x0100, -0x0300),
+              (0x0200, 0x0200, 0x0200, 0x0200),
+              (0x0080, -0x0080, 0x0040, -0x0040)], LN_TOL),
+            (PW_SM, "softmax", softmax_group_spec,
+             [(0x0200, 0x0100, 0x0000, -0x0100),
+              (0x0080, 0x0080, 0x0080, 0x0080),
+              (0x0900, 0x0000, 0x0000, 0x0000)], SM_TOL),
+        ):
+            vdata = [[vecs[b][k] for b in range(len(vecs))]
+                     for k in range(N)]
+            await stream(dut, pathway, vdata, len(vecs))
+            for i in range(N):
+                assert len(col.beats[i]) == len(vecs), (
+                    f"{name} values lane {i}: got {len(col.beats[i])} "
+                    f"beats, expected {len(vecs)}")
+                for b in range(len(vecs)):
+                    exp = spec(list(vecs[b]))[i]
+                    got = col.beats[i][b]
+                    if got >= 1 << 15:
+                        got -= 1 << 16
+                    got /= 1 << FRAC_BITS
+                    assert abs(got - exp) <= tol, (
+                        f"{name} values lane {i} beat {b}: got "
+                        f"{got:.5f}, expected {exp:.5f} "
+                        f"(tol {tol:.5f}) — de-skew/re-skew misalignment "
+                        f"or wrong group math")
+            col.clear()
 
     collector.kill()
     print(f"N={N} vpu_nxn exact/semantic passes OK "
-          f"(bypass, bias, bias+lr exact; ln/sm skew + pair isolation)")
+          f"(bypass, bias, bias+lr exact; ln/sm skew + group semantics"
+          f"{' + values' if N == 4 else ''})")

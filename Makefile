@@ -56,7 +56,8 @@ SOURCES = src/pe.sv \
 		  src/layernorm_parent.sv \
 		  src/softmax_parent.sv \
 		  src/systolic_nxn.sv \
-		  src/unified_buffer_nxn.sv
+		  src/unified_buffer_nxn.sv \
+		  src/vpu_nxn.sv
 
 # MODIFY 1) variable next to -s 
 # MODIFY 2) variable next to $(SOURCES)
@@ -122,6 +123,31 @@ test_unified_buffer_nxn_n4: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) UB_NXN_N=4 MODULE=test_unified_buffer_nxn $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv unified_buffer_nxn.vcd waveforms/unified_buffer_nxn_n4.vcd 2>/dev/null || true
+
+# Roadmap item 5c: VPU with per-lane array ports (src/vpu_nxn.sv), gate
+# tests authored harness-side. _equiv: legacy and nxn instances driven in
+# lockstep at N=2 across all seven pathway bits, compared cycle-by-cycle
+# (the legacy module is the spec). _n4: exact per-lane sequences for the
+# per-lane stages plus pairwise group-stage semantics at N=4 via iverilog
+# -P override (VPU_NXN_N tells the cocotb test the compiled width). Also
+# run plain at the default N=2.
+test_vpu_nxn_equiv: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 $(SOURCES) test/dump_vpu_nxn_equiv.sv
+	PYTHONOPTIMIZE=$(NOASSERT) MODULE=test_vpu_nxn_equiv $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv vpu_nxn_equiv.vcd waveforms/ 2>/dev/null || true
+
+test_vpu_nxn: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 $(SOURCES) test/dump_vpu_nxn.sv
+	PYTHONOPTIMIZE=$(NOASSERT) VPU_NXN_N=2 MODULE=test_vpu_nxn $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv vpu_nxn.vcd waveforms/ 2>/dev/null || true
+
+test_vpu_nxn_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=4 $(SOURCES) test/dump_vpu_nxn.sv
+	PYTHONOPTIMIZE=$(NOASSERT) VPU_NXN_N=4 MODULE=test_vpu_nxn $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv vpu_nxn.vcd waveforms/vpu_nxn_n4.vcd 2>/dev/null || true
 
 test_nn: $(SIM_BUILD_DIR)
 	$(IVERILOG) -o $(SIM_VVP) -s nn -s dump -g2012 $(SOURCES) test/dump_nn.sv

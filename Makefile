@@ -58,7 +58,9 @@ SOURCES = src/pe.sv \
 		  src/systolic_nxn.sv \
 		  src/unified_buffer_nxn.sv \
 		  src/vpu_nxn.sv \
-		  src/tpu_nxn.sv
+		  src/tpu_nxn.sv \
+		  src/layernorm_group_nxn.sv \
+		  src/softmax_group_nxn.sv
 
 # MODIFY 1) variable next to -s 
 # MODIFY 2) variable next to $(SOURCES)
@@ -357,3 +359,19 @@ test_tpu_nxn_train_n4: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_N=4 MODULE=test_tpu_nxn_train_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv tpu_nxn.vcd waveforms/tpu_nxn_train_n4.vcd 2>/dev/null || true
+
+# N-lane group LayerNorm leaf test at N=4 (item 7a; agent-authored RTL,
+# harness-authored gate test)
+test_layernorm_group_nxn: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s layernorm_group_nxn -s dump -g2012 -Playernorm_group_nxn.SYSTOLIC_ARRAY_WIDTH=4 $(SOURCES) test/dump_layernorm_group_nxn.sv
+	PYTHONOPTIMIZE=$(NOASSERT) MODULE=test_layernorm_group_nxn $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv layernorm_group_nxn.vcd waveforms/ 2>/dev/null || true
+
+# N-lane group Softmax leaf test at N=4 (item 7a; agent-authored RTL,
+# harness-authored gate test)
+test_softmax_group_nxn: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s softmax_group_nxn -s dump -g2012 -Psoftmax_group_nxn.SYSTOLIC_ARRAY_WIDTH=4 $(SOURCES) test/dump_softmax_group_nxn.sv
+	PYTHONOPTIMIZE=$(NOASSERT) MODULE=test_softmax_group_nxn $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv softmax_group_nxn.vcd waveforms/ 2>/dev/null || true

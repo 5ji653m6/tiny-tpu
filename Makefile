@@ -429,3 +429,12 @@ test_tpu_nxn_ic_train2_n4: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_IC_N=4 MODULE=test_tpu_nxn_ic_train2_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv tpu_nxn_ic.vcd waveforms/tpu_nxn_ic_train2_n4.vcd 2>/dev/null || true
+
+# Program-driven TWO training steps at N=4 (item 10; harness-only):
+# the 9a two-step choreography as ONE loaded 285-word program, one run
+# pulse, zero host traffic. Needs PROG_DEPTH=512 (285 > 256 default).
+test_tpu_nxn_prog_train2_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=4 -Pdump.PROG_DEPTH=512 $(SOURCES) test/dump_tpu_nxn_prog.sv
+	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=4 MODULE=test_tpu_nxn_prog_train2_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_train2_n4.vcd 2>/dev/null || true

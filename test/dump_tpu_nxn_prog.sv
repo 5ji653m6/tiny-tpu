@@ -1,12 +1,15 @@
 // Parameterized dump wrapper for the tpu_nxn_prog program-driven
-// full-chip test (roadmap item 9b). Compiled with -Pdump.N=4. Outputs
-// are left unconnected (results live in UB memory, read hierarchically
-// by the cocotb test). Written by the harness author, not the agent.
+// full-chip test (roadmap item 9b). Compiled with -Pdump.N=4 (and
+// -Pdump.PROG_DEPTH=512 for the item-10 two-step program, which needs
+// 286 words). Outputs are left unconnected (results live in UB memory,
+// read hierarchically by the cocotb test). Written by the harness
+// author, not the agent.
 `timescale 1ns/1ps
 `default_nettype none
 
 module dump #(
-    parameter int N = 2
+    parameter int N = 2,
+    parameter int PROG_DEPTH = 256
 )();
 
     localparam int W = 133 + 17*(N-2);
@@ -23,7 +26,8 @@ module dump #(
     logic [15:0] learning_rate_in;
 
     tpu_nxn_prog #(
-        .SYSTOLIC_ARRAY_WIDTH(N)
+        .SYSTOLIC_ARRAY_WIDTH(N),
+        .PROG_DEPTH(PROG_DEPTH)
     ) tpu_nxn_prog_inst (
         .clk(clk),
         .rst(rst),

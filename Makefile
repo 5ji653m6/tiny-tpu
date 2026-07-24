@@ -54,7 +54,8 @@ SOURCES = src/pe.sv \
 		  src/gelu_child.sv \
 		  src/gelu_parent.sv \
 		  src/layernorm_parent.sv \
-		  src/softmax_parent.sv
+		  src/softmax_parent.sv \
+		  src/systolic_nxn.sv
 
 # MODIFY 1) variable next to -s 
 # MODIFY 2) variable next to $(SOURCES)
@@ -80,6 +81,22 @@ test_systolic: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) MODULE=test_systolic $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv systolic.vcd waveforms/ 2>/dev/null || true
+
+# Roadmap item 5a: parameterized NxN array (src/systolic_nxn.sv), gate test
+# authored harness-side. Two targets: N=4 via iverilog -P override, and an
+# N=2 equivalence run at the default parameter. SYSTOLIC_NXN_N tells the
+# cocotb test which N the sim was compiled at.
+test_systolic_nxn_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s systolic_nxn -s dump -g2012 -Psystolic_nxn.SYSTOLIC_ARRAY_WIDTH=4 $(SOURCES) test/dump_systolic_nxn.sv
+	PYTHONOPTIMIZE=$(NOASSERT) SYSTOLIC_NXN_N=4 MODULE=test_systolic_nxn $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv systolic_nxn.vcd waveforms/systolic_nxn_n4.vcd 2>/dev/null || true
+
+test_systolic_nxn: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s systolic_nxn -s dump -g2012 $(SOURCES) test/dump_systolic_nxn.sv
+	PYTHONOPTIMIZE=$(NOASSERT) SYSTOLIC_NXN_N=2 MODULE=test_systolic_nxn $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv systolic_nxn.vcd waveforms/ 2>/dev/null || true
 
 test_nn: $(SIM_BUILD_DIR)
 	$(IVERILOG) -o $(SIM_VVP) -s nn -s dump -g2012 $(SOURCES) test/dump_nn.sv

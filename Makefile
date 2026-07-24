@@ -419,3 +419,13 @@ test_tpu_nxn_prog_n4: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=4 MODULE=test_tpu_nxn_prog_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_n4.vcd 2>/dev/null || true
+
+# TWO in-place training steps through the instruction port at N=4 (item
+# 9a; harness-only, no new RTL): step 2 reads the W'/B' images step 1
+# wrote back. Integer stimulus (8b matrices x2) keeps both steps
+# Q8.8-exact. Reuses the tpu_nxn_ic dump wrapper.
+test_tpu_nxn_ic_train2_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=4 $(SOURCES) test/dump_tpu_nxn_ic.sv
+	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_IC_N=4 MODULE=test_tpu_nxn_ic_train2_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv tpu_nxn_ic.vcd waveforms/tpu_nxn_ic_train2_n4.vcd 2>/dev/null || true

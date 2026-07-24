@@ -438,3 +438,16 @@ test_tpu_nxn_prog_train2_n4: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=4 MODULE=test_tpu_nxn_prog_train2_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_train2_n4.vcd 2>/dev/null || true
+
+# Attention-head composite through the instruction port at N=4 (item
+# 11; harness-only, no new RTL): S = Q@K^T with the softmax pathway
+# (P lands at the UB write pointer), then O = P@V with the bypass
+# pathway reading P straight back off the chip's own UB. Golden is
+# hardware-exact integer arithmetic (fxp_mul/fxp_add per-step rounding,
+# exact exp LUT, exact ROUND=1 division). Reuses the tpu_nxn_ic dump
+# wrapper.
+test_tpu_nxn_ic_attn_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=4 $(SOURCES) test/dump_tpu_nxn_ic.sv
+	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_IC_N=4 MODULE=test_tpu_nxn_ic_attn_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv tpu_nxn_ic.vcd waveforms/tpu_nxn_ic_attn_n4.vcd 2>/dev/null || true

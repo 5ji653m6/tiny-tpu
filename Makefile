@@ -57,7 +57,8 @@ SOURCES = src/pe.sv \
 		  src/softmax_parent.sv \
 		  src/systolic_nxn.sv \
 		  src/unified_buffer_nxn.sv \
-		  src/vpu_nxn.sv
+		  src/vpu_nxn.sv \
+		  src/tpu_nxn.sv
 
 # MODIFY 1) variable next to -s 
 # MODIFY 2) variable next to $(SOURCES)
@@ -329,5 +330,24 @@ lint:
 clean:
 	rm -rf waveforms/*vcd $(SIM_BUILD_DIR) test/__pycache__
 
-.PHONY: clean	
+.PHONY: clean
 
+# Roadmap item 5d-2: full-chip top tpu_nxn (src/tpu_nxn.sv) integrating
+# the three nxn children. Gate tests authored harness-side.
+# _equiv: legacy tpu and tpu_nxn at N=2 share the full test_tpu.py
+# instruction script (forward+backward+gradient descent); the two
+# 128-word UB images are compared at the end (the legacy chip is the
+# spec — including its beat-clip quirks). _n4: exact per-lane VPU
+# output streams and UB placement for a 4x4 forward matmul (X @ W.T +
+# bias, leaky_relu) with all-dyadic stimulus so the golden is exact.
+test_tpu_nxn_equiv: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 $(SOURCES) test/dump_tpu_nxn_equiv.sv
+	PYTHONOPTIMIZE=$(NOASSERT) MODULE=test_tpu_nxn_equiv $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv tpu_nxn_equiv.vcd waveforms/ 2>/dev/null || true
+
+test_tpu_nxn_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=4 $(SOURCES) test/dump_tpu_nxn.sv
+	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_N=4 MODULE=test_tpu_nxn_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv tpu_nxn.vcd waveforms/tpu_nxn_n4.vcd 2>/dev/null || true

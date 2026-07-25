@@ -569,3 +569,22 @@ test_instr_seq_nxn_loopxl_n4: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) INSTR_SEQ_N=4 MODULE=test_instr_seq_nxn_loopxl $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv instr_seq_nxn.vcd waveforms/instr_seq_nxn_loopxl_n4.vcd 2>/dev/null || true
+
+# DiT capstone (item 17b2, harness-only): ONE loaded program runs a
+# full diffusion-transformer denoiser block — pre-LN two-head attention
+# with a residual, pre-LN SiLU MLP with a residual, final head
+# projection — iterated T=3 timesteps. All 16 phases form ONE 838-word
+# LOOPI body (LOOPI(3, 838, sa=224, sw=224, wbase=176)): host weights
+# (176 words, below wbase) re-read verbatim every timestep while every
+# intermediate appends in a 224-word per-iteration region; host x sits
+# at wbase-16 so phase 1's striding activation read lands on iteration
+# t-1's y — the sampler recurrence never leaves the UB. 884-word
+# program needs PROG_DEPTH=1024; the 848-word image needs UB_WIDTH=1024.
+# Golden is hardware-exact integer arithmetic throughout, including the
+# NEW exact LayerNorm model derived line-by-line from
+# layernorm_group_nxn.sv + fixedpoint.sv (fxp_zoom/fxp_sqrt/fxp_div).
+test_tpu_nxn_prog_dit_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=4 -Pdump.PROG_DEPTH=1024 -Pdump.UB_WIDTH=1024 $(SOURCES) test/dump_tpu_nxn_prog.sv
+	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=4 MODULE=test_tpu_nxn_prog_dit_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_dit_n4.vcd 2>/dev/null || true

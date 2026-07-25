@@ -15,7 +15,7 @@
 // separate port (learning_rate_in) and is passed straight through to
 // tpu_nxn.
 //
-// Instruction word: 133 + 17*(N-2) bits (see control_unit_nxn.sv for
+// Instruction word: 134 + 17*(N-2) bits (see control_unit_nxn.sv for
 // the field layout; legacy 133-bit images zero-extend and keep working).
 // No outputs: results land in UB memory, as in tpu_nxn.
 //
@@ -29,8 +29,8 @@ module tpu_nxn_ic #(
     input logic clk,
     input logic rst,
 
-    // 133 + 17*(N-2) bits; exactly the legacy 133 bits at N = 2
-    input logic [132+17*(SYSTOLIC_ARRAY_WIDTH-2):0] instruction,
+    // 134 + 17*(N-2) bits; the SiLU pathway bit is the MSB
+    input logic [133+17*(SYSTOLIC_ARRAY_WIDTH-2):0] instruction,
 
     // Learning rate (separate port, not in the instruction word)
     input logic [15:0] learning_rate_in
@@ -46,7 +46,7 @@ module tpu_nxn_ic #(
     logic [15:0] ub_rd_row_size;
     logic [15:0] ub_rd_addr_in;
     logic [8:0]  ub_ptr_select;
-    logic [6:0]  vpu_data_pathway;
+    logic [7:0]  vpu_data_pathway;
     logic [15:0] vpu_leak_factor_in;
     logic [15:0] inv_batch_size_times_two_in;
 

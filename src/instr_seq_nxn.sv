@@ -2,7 +2,7 @@
 `default_nettype none
 
 // Loadable instruction sequencer (roadmap items 9b + 12): stores a
-// program of {ctrl, 133+17*(N-2)-bit legacy word} program words and
+// program of {ctrl, 134+17*(N-2)-bit legacy word} program words and
 // replays it, one word per cycle, into an instruction consumer
 // (tpu_nxn_ic). instr_out STAYS the legacy width -- the consumer
 // contract (tpu_nxn_ic.instruction) is unchanged.
@@ -61,17 +61,17 @@ module instr_seq_nxn #(
     // Program load interface (ignored while busy). The program word
     // is ONE bit wider than instr_out: {ctrl, legacy_word}.
     input logic prog_wr_en,
-    input logic [133+17*(SYSTOLIC_ARRAY_WIDTH-2):0] prog_wr_data,
+    input logic [134+17*(SYSTOLIC_ARRAY_WIDTH-2):0] prog_wr_data,
 
     // 1-cycle pulse starts the replay (ignored while busy or empty)
     input logic run,
 
     output logic busy,
-    output logic [132+17*(SYSTOLIC_ARRAY_WIDTH-2):0] instr_out
+    output logic [133+17*(SYSTOLIC_ARRAY_WIDTH-2):0] instr_out
 );
 
     localparam int N = SYSTOLIC_ARRAY_WIDTH;
-    localparam int W = 133 + 17*(N-2);   // legacy instruction width
+    localparam int W = 134 + 17*(N-2);   // legacy instruction width
     localparam int PW = W + 1;           // program word = {ctrl, word}
     // Wide enough to represent PROG_DEPTH itself (full memory).
     localparam int PTR_W = $clog2(PROG_DEPTH + 1);

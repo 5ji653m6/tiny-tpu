@@ -53,6 +53,8 @@ SOURCES = src/pe.sv \
 		  src/gradient_descent.sv \
 		  src/gelu_child.sv \
 		  src/gelu_parent.sv \
+		  src/silu_child.sv \
+		  src/silu_parent.sv \
 		  src/layernorm_parent.sv \
 		  src/softmax_parent.sv \
 		  src/systolic_nxn.sv \

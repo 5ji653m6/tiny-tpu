@@ -42,7 +42,7 @@ module tpu_nxn #(
     input logic [15:0] learning_rate_in,
 
     // VPU data pathway (see tpu.sv / vpu_nxn.sv for bit definitions)
-    input logic [6:0] vpu_data_pathway,
+    input logic [7:0] vpu_data_pathway,
 
     input logic sys_switch_in,
     input logic [15:0] vpu_leak_factor_in,

@@ -5,15 +5,15 @@
 // 2-lane control_unit.sv to SYSTOLIC_ARRAY_WIDTH = N host lanes
 // (N >= 2). Purely combinational -- no clock.
 //
-// Instruction word: 133 + 17*(N-2) bits total, where
+// Instruction word: 134 + 17*(N-2) bits total, where
 // N = SYSTOLIC_ARRAY_WIDTH. All legacy field positions (bits 0-132)
 // are IDENTICAL to control_unit.sv; the extra host lanes are appended
 // at the top of the word, following the item-4 ISA precedent (bits
-// 132-130 were appended for the VPU pathway extension the same way).
+// 132-130 were appended for the VPU pathway extension the same way),
+// and the item-13 SiLU pathway bit is appended as the new MSB.
 // Legacy 133-bit instruction images zero-extend the appended region
 // and keep working: every appended lane decodes valid = 0, so there
-// are no spurious host writes. At N = 2 the word is exactly the
-// legacy 133 bits and this module is a drop-in for control_unit.
+// are no spurious host writes, and the SiLU stage decodes bypassed.
 //
 // Field layout (legacy region, bits 0-132, unchanged):
 //   bits 0-4     : 1-bit signals (sys_switch_in, ub_rd_start_in, ub_rd_transpose,
@@ -28,6 +28,7 @@
 //   bits 98-113  : inv_batch_size_times_two_in [15:0]
 //   bits 114-129 : vpu_leak_factor_in [15:0]
 //   bits 130-132 : vpu_data_pathway [6:4] (new stages: gelu(4), ln(5), sm(6))
+//   bit  133+17*(N-2) (the MSB): vpu_data_pathway [7] (item-13 SiLU stage)
 //
 // Field layout (appended region, bits 133 and up, lane k >= 2):
 //   lane k data  : bits [133+16*(k-2) +: 16]   (ub_wr_host_data_in[k])
@@ -41,7 +42,7 @@
 // carry host lane k; lanes 0 and 1 alias the legacy scalar outputs
 // ub_wr_host_valid_in_1/_2 and ub_wr_host_data_in_1/_2 (same decode).
 //
-// vpu_data_pathway is 7 bits: |sm(6)|ln(5)|gelu(4)|bias(3)|lr(2)|loss(1)|lr_d(0)|
+// vpu_data_pathway is 8 bits: |silu(7)|sm(6)|ln(5)|gelu(4)|bias(3)|lr(2)|loss(1)|lr_d(0)|
 // (1 = stage enabled, 0 = bypassed). Legacy 4-bit encodings zero-extend
 // into bits [3:0]:
 //   0b0000 = bypass     (all stages bypassed)
@@ -51,8 +52,8 @@
 module control_unit_nxn #(
     parameter int SYSTOLIC_ARRAY_WIDTH = 2
 ) (
-    // 133 + 17*(N-2) bits total; exactly the legacy 133 bits at N = 2
-    input logic [132+17*(SYSTOLIC_ARRAY_WIDTH-2):0] instruction,
+    // 134 + 17*(N-2) bits total; the SiLU pathway bit is the MSB
+    input logic [133+17*(SYSTOLIC_ARRAY_WIDTH-2):0] instruction,
 
     // 1-bit signals - 5
     output logic sys_switch_in,
@@ -73,8 +74,8 @@ module control_unit_nxn #(
     output logic [15:0] ub_wr_host_data_in_1,
     output logic [15:0] ub_wr_host_data_in_2,
 
-    // 7-bit signal (|sm|ln|gelu|bias|lr|loss|lr_d|, 1 bit per VPU stage, 0 = bypass)
-    output logic [6:0] vpu_data_pathway,
+    // 8-bit signal (|silu|sm|ln|gelu|bias|lr|loss|lr_d|, 1 bit per VPU stage, 0 = bypass)
+    output logic [7:0] vpu_data_pathway,
 
     //16-bit signals
     output logic [15:0] inv_batch_size_times_two_in,
@@ -113,9 +114,11 @@ module control_unit_nxn #(
     // bits 78-93: ub_wr_host_data_in_2 [15:0]
     assign ub_wr_host_data_in_2 = instruction[93:78];
 
-    // bits 94-97 + 130-132: vpu_data_pathway [6:0]
-    // legacy stages in bits 94-97, new stages (gelu/ln/sm) appended in bits 130-132
-    assign vpu_data_pathway = {instruction[132:130], instruction[97:94]};
+    // bits 94-97 + 130-132 + MSB: vpu_data_pathway [7:0]
+    // legacy stages in bits 94-97, item-4 stages (gelu/ln/sm) in bits
+    // 130-132, item-13 SiLU appended as the new MSB
+    assign vpu_data_pathway = {instruction[133+17*(SYSTOLIC_ARRAY_WIDTH-2)],
+                               instruction[132:130], instruction[97:94]};
 
     // bits 98-113: inv_batch_size_times_two_in [15:0]
     assign inv_batch_size_times_two_in = instruction[113:98];

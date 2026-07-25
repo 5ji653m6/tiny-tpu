@@ -8,7 +8,7 @@
 // instances of each parent in a generate loop over pairs p, wiring parent
 // lane _1 to array lane 2p and parent lane _2 to array lane 2p+1. The
 // combinational stage-chain routing
-//   bias -> leaky_relu -> gelu -> layernorm -> softmax -> loss
+//   bias -> leaky_relu -> gelu -> silu -> layernorm -> softmax -> loss
 //     -> leaky_relu_derivative
 // is replicated per lane with the same bypass semantics as vpu.sv (a
 // disabled stage gets zeroed inputs and its upstream wires pass through),
@@ -37,15 +37,16 @@
 //     N==2 special case of this structure.
 
 /*
-vpu_data_pathway is 7 bits: |sm(6)| |ln(5)| |gelu(4)| |bias(3)| |lr(2)| |loss(1)| |lr_d(0)|
+vpu_data_pathway is 8 bits: |silu(7)| |sm(6)| |ln(5)| |gelu(4)| |bias(3)| |lr(2)| |loss(1)| |lr_d(0)|
 
-0000000: activate no modules
-0001100: forward pass pathway (sys --> bias --> leaky relu --> output)
-0001111: transition pathway (sys --> bias --> leaky relu --> loss --> leaky relu derivative --> output)
-0000001: backward pass pathway (sys --> leaky relu derivative --> output)
-001xxxx: gelu stage enabled (inserted between leaky relu and layernorm)
-01xxxxx: layernorm stage enabled (inserted between gelu and softmax)
-1xxxxxx: softmax stage enabled (inserted between layernorm and loss)
+00000000: activate no modules
+00001100: forward pass pathway (sys --> bias --> leaky relu --> output)
+00001111: transition pathway (sys --> bias --> leaky relu --> loss --> leaky relu derivative --> output)
+00000001: backward pass pathway (sys --> leaky relu derivative --> output)
+0001xxxx: gelu stage enabled (inserted between leaky relu and silu)
+001xxxxx: layernorm stage enabled (inserted between silu and softmax)
+01xxxxxx: softmax stage enabled (inserted between layernorm and loss)
+1xxxxxxx: silu stage enabled (inserted between gelu and layernorm)
 */
 
 module vpu_nxn #(
@@ -54,7 +55,7 @@ module vpu_nxn #(
     input logic clk,
     input logic rst,
 
-    input logic [6:0] vpu_data_pathway, // 1 bit per stage; bit 4 = gelu, bit 5 = layernorm, bit 6 = softmax
+    input logic [7:0] vpu_data_pathway, // 1 bit per stage; bit 4 = gelu, bit 5 = layernorm, bit 6 = softmax, bit 7 = silu
 
     // Inputs from systolic array (one per lane; index 0 = column 1)
     input logic [15:0] vpu_data_in [SYSTOLIC_ARRAY_WIDTH],
@@ -113,6 +114,16 @@ module vpu_nxn #(
     // gelu to loss intermediate values
     logic signed [15:0] gelu_to_loss_data [N];
     logic gelu_to_loss_valid [N];
+
+    // silu (elementwise stage, like gelu: no de-skew/re-skew)
+    logic signed [15:0] silu_data_in_s [N];
+    logic silu_valid_in_s [N];
+    logic signed [15:0] silu_data_out_s [N];
+    logic silu_valid_out_s [N];
+
+    // silu to loss intermediate values
+    logic signed [15:0] silu_to_loss_data [N];
+    logic silu_to_loss_valid [N];
 
     // layernorm
     // BUG-TOOLS-1 (iverilog 11): the group-stage output arrays are driven
@@ -235,6 +246,23 @@ module vpu_nxn #(
                 .gelu_valid_2_out(gelu_valid_out_s[2*p+1]),
                 .gelu_overflow_out_1(),   // BUG-OVF-1: observable via hierarchical reference
                 .gelu_overflow_out_2()
+            );
+
+            silu_parent silu_parent_inst (
+                .clk(clk),
+                .rst(rst),
+
+                .silu_data_1_in(silu_data_in_s[2*p]),
+                .silu_data_2_in(silu_data_in_s[2*p+1]),
+                .silu_valid_1_in(silu_valid_in_s[2*p]),
+                .silu_valid_2_in(silu_valid_in_s[2*p+1]),
+
+                .silu_data_1_out(silu_data_out_s[2*p]),
+                .silu_data_2_out(silu_data_out_s[2*p+1]),
+                .silu_valid_1_out(silu_valid_out_s[2*p]),
+                .silu_valid_2_out(silu_valid_out_s[2*p+1]),
+                .silu_overflow_out_1(),   // BUG-OVF-1: observable via hierarchical reference
+                .silu_overflow_out_2()
             );
 
             loss_parent loss_parent_inst (
@@ -530,6 +558,8 @@ module vpu_nxn #(
             lr_to_loss_valid[k]  = 1'b0;
             gelu_to_loss_data[k]  = 16'b0;
             gelu_to_loss_valid[k] = 1'b0;
+            silu_to_loss_data[k]  = 16'b0;
+            silu_to_loss_valid[k] = 1'b0;
             ln_to_loss_data[k]   = 16'b0;
             ln_to_loss_valid[k]  = 1'b0;
             sm_to_loss_data[k]   = 16'b0;
@@ -550,6 +580,8 @@ module vpu_nxn #(
                 lr_valid_in_s[k]   = 1'b0;
                 gelu_data_in_s[k]  = 16'b0;
                 gelu_valid_in_s[k] = 1'b0;
+                silu_data_in_s[k]  = 16'b0;
+                silu_valid_in_s[k] = 1'b0;
                 ln_data_in_s[k]    = 16'b0;
                 ln_valid_in_s[k]   = 1'b0;
                 sm_data_in_s[k]    = 16'b0;
@@ -616,11 +648,30 @@ module vpu_nxn #(
                     gelu_to_loss_valid[k] = lr_to_loss_valid[k];
                 end
 
+                // silu module (elementwise stage, like gelu)
+                if (vpu_data_pathway[7]) begin
+                    // connect silu inputs to intermediate values
+                    silu_data_in_s[k]  = gelu_to_loss_data[k];
+                    silu_valid_in_s[k] = gelu_to_loss_valid[k];
+
+                    // connect silu outputs to intermediate values
+                    silu_to_loss_data[k]  = silu_data_out_s[k];
+                    silu_to_loss_valid[k] = silu_valid_out_s[k];
+                end else begin
+                    // disable inputs
+                    silu_data_in_s[k]  = 16'b0;
+                    silu_valid_in_s[k] = 1'b0;
+
+                    // bypass: connect intermediate values to each other
+                    silu_to_loss_data[k]  = gelu_to_loss_data[k];
+                    silu_to_loss_valid[k] = gelu_to_loss_valid[k];
+                end
+
                 // layernorm module (group stage: operates on the pair)
                 if (vpu_data_pathway[5]) begin
                     // connect layernorm inputs to intermediate values
-                    ln_data_in_s[k]  = gelu_to_loss_data[k];
-                    ln_valid_in_s[k] = gelu_to_loss_valid[k];
+                    ln_data_in_s[k]  = silu_to_loss_data[k];
+                    ln_valid_in_s[k] = silu_to_loss_valid[k];
 
                     // connect layernorm outputs to intermediate values
                     // (uniform per-lane view; re-skew lives in the generate branches)
@@ -632,8 +683,8 @@ module vpu_nxn #(
                     ln_valid_in_s[k] = 1'b0;
 
                     // bypass: connect intermediate values to each other
-                    ln_to_loss_data[k]  = gelu_to_loss_data[k];
-                    ln_to_loss_valid[k] = gelu_to_loss_valid[k];
+                    ln_to_loss_data[k]  = silu_to_loss_data[k];
+                    ln_to_loss_valid[k] = silu_to_loss_valid[k];
                 end
 
                 // softmax module (group stage: operates on the pair)

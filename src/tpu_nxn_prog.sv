@@ -38,7 +38,7 @@ module tpu_nxn_prog #(
     // Program word = {ctrl, legacy_word}: one bit wider than the
     // instruction word the chip consumes.
     input logic prog_wr_en,
-    input logic [133+17*(SYSTOLIC_ARRAY_WIDTH-2):0] prog_wr_data,
+    input logic [134+17*(SYSTOLIC_ARRAY_WIDTH-2):0] prog_wr_data,
     input logic run,
     output logic busy,
 
@@ -47,7 +47,7 @@ module tpu_nxn_prog #(
 );
 
     localparam int N = SYSTOLIC_ARRAY_WIDTH;
-    localparam int W = 133 + 17*(N-2);   // legacy instruction width
+    localparam int W = 134 + 17*(N-2);   // legacy instruction width
 
     // Sequencer -> chip instruction stream (legacy width, unchanged
     // consumer contract).

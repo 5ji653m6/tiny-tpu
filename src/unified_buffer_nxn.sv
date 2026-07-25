@@ -112,6 +112,11 @@ module unified_buffer_nxn #(
     logic [15:0] rd_bias_row_size;
     logic [15:0] rd_bias_col_size;
     logic [15:0] rd_bias_time_counter;
+    // Item 17a: ptr-7 RESIDUAL reads share the bias channel and its
+    // skew/window, but walk the matrix elementwise (linear) instead of
+    // the ptr-2 per-column broadcast. Set by a ptr-7 read command,
+    // cleared by a ptr-2 read command.
+    logic        rd_bias_residual;
 
     // Internal logic for Y inputs from UB to loss modules in VPU
     logic [15:0] rd_Y_ptr;
@@ -303,6 +308,7 @@ module unified_buffer_nxn #(
             rd_bias_row_size <= '0;
             rd_bias_col_size <= '0;
             rd_bias_time_counter <= '0;
+            rd_bias_residual <= '0;
 
             rd_Y_ptr <= '0;
             rd_Y_row_size <= '0;
@@ -508,7 +514,15 @@ module unified_buffer_nxn #(
             if (rd_bias_time_counter + 1 < rd_bias_row_size + rd_bias_col_size) begin
                 for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
                     if(rd_bias_time_counter >= i && rd_bias_time_counter < rd_bias_row_size + i && i < rd_bias_col_size) begin
-                        ub_rd_bias_data_out_r[i] <= ub_memory[rd_bias_ptr + i];
+                        // ptr-2 bias: lane i's value (column i) held for
+                        // every row. ptr-7 residual: elementwise linear
+                        // walk of the row-major matrix at rd_bias_ptr --
+                        // lane i's r-th active beat (r = time_counter - i)
+                        // carries ub_memory[ptr + r*col_size + i]. Same
+                        // per-lane skew and active window either way.
+                        ub_rd_bias_data_out_r[i] <= rd_bias_residual
+                            ? ub_memory[rd_bias_ptr + (rd_bias_time_counter - i)*rd_bias_col_size + i]
+                            : ub_memory[rd_bias_ptr + i];
                     end else begin
                         ub_rd_bias_data_out_r[i] <= '0;
                     end
@@ -644,6 +658,20 @@ module unified_buffer_nxn #(
                         rd_bias_row_size <= ub_rd_row_size;
                         rd_bias_col_size <= ub_rd_col_size;
                         rd_bias_time_counter <= '0;
+                        rd_bias_residual <= 1'b0;
+                    end
+                    7: begin
+                        // Item 17a RESIDUAL read: arms the SAME bias
+                        // operand stream (same skew, same active window)
+                        // but with the elementwise linear walk. Issued
+                        // mid-phase like the legacy bias read, it arms
+                        // only that phase's output stream: the bias stage
+                        // (pathway bit 3) then computes C = A@W + R.
+                        rd_bias_ptr <= ub_rd_addr_in;
+                        rd_bias_row_size <= ub_rd_row_size;
+                        rd_bias_col_size <= ub_rd_col_size;
+                        rd_bias_time_counter <= '0;
+                        rd_bias_residual <= 1'b1;
                     end
                     3: begin
                         rd_Y_ptr <= ub_rd_addr_in;

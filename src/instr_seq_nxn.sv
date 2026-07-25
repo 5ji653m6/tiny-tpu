@@ -32,6 +32,8 @@
 //     bit  [16]    indexed flag
 //     bits [39:24] stride_a (16-bit unsigned)
 //     bits [55:40] stride_w (16-bit unsigned)
+//     bits [71:56] wbase    (16-bit unsigned, item 17a; ZERO = exact
+//                  item-15 behavior)
 //   With the flag CLEAR the strides are IGNORED and behavior is
 //   EXACTLY the item-12 LOOP (every pre-item-15 program replays
 //   bit-identically). With the flag SET, on loop iteration i
@@ -43,6 +45,16 @@
 //   non-read words, reads with any other ptr value (5/6 gradient
 //   reads), switch/idle/host-write words -- passes through
 //   bit-identical on every iteration.
+//
+//   Item 17a (wbase): with the indexed flag SET, a ptr-1 body read
+//   advances by i*stride_w ONLY when its addr >= wbase (the boundary
+//   addr == wbase advances); below wbase it passes bit-identical --
+//   stationary host weights live below wbase, chip-produced
+//   per-iteration intermediates at/above it. A ptr-7 body read (the
+//   item-17a residual read) advances by i*stride_a (same stride as
+//   ptr 0 -- residuals are activations). wbase = 0 advances every
+//   ptr-1 read (exact item-15 behavior). With the flag CLEAR the
+//   wbase field is ignored along with the strides (exact item-12).
 //
 //   Loop state -- the iteration counter included -- resets on every
 //   run pulse: a re-run replays the loop identically. Out of contract
@@ -122,6 +134,9 @@ module instr_seq_nxn #(
     logic loop_indexed;
     logic [15:0] loop_stride_a;
     logic [15:0] loop_stride_w;
+    // Item 17a: ptr-1 reads below wbase are frozen (stationary host
+    // weights); at/above wbase they advance by stride_w.
+    logic [15:0] loop_wbase;
     logic [7:0] loop_iter;
 
     // Previous-cycle rst, for entry-into-reset detection. Initialized
@@ -157,15 +172,24 @@ module instr_seq_nxn #(
     // complete) and must pass through untouched.
     wire in_loop_body = loop_active && loop_indexed
                         && (fetch_ptr != loop_end);
-    // UB read command (bit 1 set) with ptr exactly 0 or 1.
+    // UB read command (bit 1 set) with ptr exactly 0, or ptr exactly 1
+    // at/above wbase, or ptr exactly 7 (item-17a residual read).
+    wire fetch_ptr0 = (fetch_word[61:53] == 9'd0);
+    wire fetch_ptr1 = (fetch_word[61:53] == 9'd1);
+    wire fetch_ptr7 = (fetch_word[61:53] == 9'd7);
+    // wbase gate: the boundary addr == wbase advances (inclusive);
+    // wbase = 0 advances every ptr-1 read (item-15 behavior).
+    wire fetch_w_adv = fetch_ptr1 && (fetch_word[52:37] >= loop_wbase);
     wire indexable_read = in_loop_body && fetch_word[1]
-                          && (fetch_word[61:53] <= 9'd1);
+                          && (fetch_ptr0 || fetch_w_adv || fetch_ptr7);
     // The word fetched on a jump cycle is the FIRST word of the NEXT
     // pass (loop_iter increments on the same edge), so the transform
     // uses the next-pass index there.
     wire [7:0] emit_iter = loop_jump ? (loop_iter + 1'b1) : loop_iter;
-    wire [15:0] emit_stride = fetch_word[53] ? loop_stride_w
-                                             : loop_stride_a;
+    // ptr-1 reads stride by stride_w; ptr-0 and ptr-7 reads both
+    // stride by stride_a (residuals are activations).
+    wire [15:0] emit_stride = fetch_ptr1 ? loop_stride_w
+                                         : loop_stride_a;
     // 16-bit unsigned add on the addr field; the i*stride offset is
     // computed mod 2^16 (offset overflow is out of contract).
     wire [15:0] emit_offset = emit_iter * emit_stride;
@@ -225,6 +249,7 @@ module instr_seq_nxn #(
                             loop_indexed  <= fetch_word[16];
                             loop_stride_a <= fetch_word[39:24];
                             loop_stride_w <= fetch_word[55:40];
+                            loop_wbase    <= fetch_word[71:56];
                             loop_iter     <= '0;
                             rd_ptr        <= fetch_ptr + 1'b1;
                         end else begin

@@ -1,12 +1,13 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// Program-driven full-chip top (roadmap item 9b): wires the loadable
-// instruction sequencer (instr_seq_nxn) in front of the
+// Program-driven full-chip top (roadmap items 9b + 12): wires the
+// loadable instruction sequencer (instr_seq_nxn) in front of the
 // instruction-consuming chip top (tpu_nxn_ic), so the host loads a
 // program of instruction words once and a single `run` pulse replays
-// the whole choreography (e.g. the item-8b training step) with no
-// further per-cycle host driving.
+// the whole choreography (e.g. the item-8b training step, or the
+// item-12 LOOPed attention phase-1 composite) with no further
+// per-cycle host driving.
 //
 // This is a THIN SHELL: sequencer + chip + wires. No new logic, no
 // registers, no re-implementation of tpu_nxn_ic internals.
@@ -15,6 +16,11 @@
 //   - learning_rate_in passes straight through (it is a chip port,
 //     not part of the instruction word)
 // No outputs other than busy: results land in UB memory, as in tpu_nxn.
+//
+// Item 12: the program word is ONE bit wider than the instruction
+// word -- {ctrl, legacy_word}, ctrl the MSB (LOOP control-word
+// construct, see instr_seq_nxn.sv). Only the prog_wr_data port
+// widens; the sequencer strips ctrl before the chip ever sees a word.
 //
 // Program load protocol (see instr_seq_nxn.sv): while busy = 0, drive
 // prog_wr_en + prog_wr_data one word per cycle (loads work even while
@@ -28,9 +34,11 @@ module tpu_nxn_prog #(
     input logic clk,
     input logic rst,
 
-    // Program load + run (the instruction sequencer interface)
+    // Program load + run (the instruction sequencer interface).
+    // Program word = {ctrl, legacy_word}: one bit wider than the
+    // instruction word the chip consumes.
     input logic prog_wr_en,
-    input logic [132+17*(SYSTOLIC_ARRAY_WIDTH-2):0] prog_wr_data,
+    input logic [133+17*(SYSTOLIC_ARRAY_WIDTH-2):0] prog_wr_data,
     input logic run,
     output logic busy,
 
@@ -39,9 +47,10 @@ module tpu_nxn_prog #(
 );
 
     localparam int N = SYSTOLIC_ARRAY_WIDTH;
-    localparam int W = 133 + 17*(N-2);
+    localparam int W = 133 + 17*(N-2);   // legacy instruction width
 
-    // Sequencer -> chip instruction stream
+    // Sequencer -> chip instruction stream (legacy width, unchanged
+    // consumer contract).
     logic [W-1:0] instr;
 
     instr_seq_nxn #(

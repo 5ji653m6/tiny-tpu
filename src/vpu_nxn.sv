@@ -8,8 +8,12 @@
 // instances of each parent in a generate loop over pairs p, wiring parent
 // lane _1 to array lane 2p and parent lane _2 to array lane 2p+1. The
 // combinational stage-chain routing
-//   bias -> leaky_relu -> gelu -> silu -> layernorm -> softmax -> loss
+//   [scale] -> bias -> leaky_relu -> gelu -> silu -> layernorm -> softmax -> loss
 //     -> leaky_relu_derivative
+// (item 18a: the scale stage is flag-routed, NOT a pathway bit -- all 8
+// are taken. scale_arm_in set: in the chain at the head with the usual
+// 1-cycle stage latency; clear: bypassed combinationally, so pre-item-18
+// chains are bit- and latency-identical.)
 // is replicated per lane with the same bypass semantics as vpu.sv (a
 // disabled stage gets zeroed inputs and its upstream wires pass through),
 // including the BUG-VPU-1..4 fixes per lane (registered outputs, last_H
@@ -62,7 +66,9 @@ module vpu_nxn #(
     input logic vpu_valid_in [SYSTOLIC_ARRAY_WIDTH],
 
     // Inputs from UB
-    input logic [15:0] bias_scalar_in [SYSTOLIC_ARRAY_WIDTH],   // For bias modules
+    input logic [15:0] bias_scalar_in [SYSTOLIC_ARRAY_WIDTH],   // For bias modules (item 18a: also the scale stage's operand -- the ptr-8 scale read rides this same channel)
+    input logic scale_valid_in [SYSTOLIC_ARRAY_WIDTH],          // Item 18a: per-lane scale-operand window (UB rd_bias_scale schedule)
+    input logic scale_arm_in,                                   // Item 18a: routes the scale stage into the chain head when set
     input logic [15:0] lr_leak_factor_in,                       // For leaky relu modules (shared)
     input logic [15:0] Y_in [SYSTOLIC_ARRAY_WIDTH],             // For loss modules
     input logic [15:0] inv_batch_size_times_two_in,             // For loss modules (shared)
@@ -84,6 +90,16 @@ module vpu_nxn #(
 
     localparam int N = SYSTOLIC_ARRAY_WIDTH;
     localparam int PAIRS = SYSTOLIC_ARRAY_WIDTH / 2;
+
+    // scale (item 18a: head-of-chain multiply, flag-routed)
+    logic signed [15:0] scale_data_in_s [N];
+    logic scale_valid_in_s [N];
+    logic signed [15:0] scale_data_out_s [N];
+    logic scale_valid_out_s [N];
+
+    // scale to bias intermediate values
+    logic signed [15:0] s_to_b_data [N];
+    logic s_to_b_valid [N];
 
     // bias
     logic signed [15:0] bias_data_in_s [N];
@@ -192,6 +208,27 @@ module vpu_nxn #(
     genvar p;
     generate
         for (p = 0; p < PAIRS; p++) begin : gen_pair
+
+            scale_parent scale_parent_inst (
+                .clk(clk),
+                .rst(rst),
+                .scale_sys_data_in_1(scale_data_in_s[2*p]),
+                .scale_sys_data_in_2(scale_data_in_s[2*p+1]),
+                .scale_sys_valid_in_1(scale_valid_in_s[2*p]),
+                .scale_sys_valid_in_2(scale_valid_in_s[2*p+1]),
+
+                .scale_scalar_in_1(bias_scalar_in[2*p]),
+                .scale_scalar_in_2(bias_scalar_in[2*p+1]),
+                .scale_valid_in_1(scale_valid_in[2*p]),
+                .scale_valid_in_2(scale_valid_in[2*p+1]),
+
+                .scale_Z_valid_out_1(scale_valid_out_s[2*p]),
+                .scale_Z_valid_out_2(scale_valid_out_s[2*p+1]),
+                .scale_z_data_out_1(scale_data_out_s[2*p]),
+                .scale_z_data_out_2(scale_data_out_s[2*p+1]),
+                .scale_overflow_out_1(),   // BUG-OVF-1: observable via hierarchical reference
+                .scale_overflow_out_2()
+            );
 
             bias_parent bias_parent_inst (
                 .clk(clk),
@@ -552,6 +589,8 @@ module vpu_nxn #(
         for (int k = 0; k < N; k++) begin
             // Default assignments for all intermediate signals to prevent latch inference.
             // These are overridden by the routing logic below when rst is not asserted.
+            s_to_b_data[k]       = 16'b0;
+            s_to_b_valid[k]      = 1'b0;
             b_to_lr_data[k]      = 16'b0;
             b_to_lr_valid[k]     = 1'b0;
             lr_to_loss_data[k]   = 16'b0;
@@ -574,6 +613,8 @@ module vpu_nxn #(
                 vpu_valid_mux[k] = 1'b0;
 
                 // default internal wire assignments during reset
+                scale_data_in_s[k]  = 16'b0;
+                scale_valid_in_s[k] = 1'b0;
                 bias_data_in_s[k]  = 16'b0;
                 bias_valid_in_s[k] = 1'b0;
                 lr_data_in_s[k]    = 16'b0;
@@ -591,11 +632,35 @@ module vpu_nxn #(
                 lr_d_data_in_s[k]  = 16'b0;
                 lr_d_valid_in_s[k] = 1'b0;
             end else begin
+                // scale module (item 18a): flag-routed head of chain, no
+                // pathway bit. Armed: the registered stage is in the
+                // chain (1-cycle stage latency; the operand read alone
+                // arms the multiply, gated per-beat by scale_valid_in).
+                // Clear: combinational passthrough -- pre-item-18 chains
+                // are bit- and latency-identical.
+                if (scale_arm_in) begin
+                    // connect vpu inputs to scale module
+                    scale_data_in_s[k]  = vpu_data_in[k];
+                    scale_valid_in_s[k] = vpu_valid_in[k];
+
+                    // connect scale output to intermediate values
+                    s_to_b_data[k]  = scale_data_out_s[k];
+                    s_to_b_valid[k] = scale_valid_out_s[k];
+                end else begin
+                    // disable inputs
+                    scale_data_in_s[k]  = 16'b0;
+                    scale_valid_in_s[k] = 1'b0;
+
+                    // bypass: connect vpu input to intermediate values
+                    s_to_b_data[k]  = vpu_data_in[k];
+                    s_to_b_valid[k] = vpu_valid_in[k];
+                end
+
                 // bias module
                 if (vpu_data_pathway[3]) begin
-                    // connect vpu inputs to bias module
-                    bias_data_in_s[k]  = vpu_data_in[k];
-                    bias_valid_in_s[k] = vpu_valid_in[k];
+                    // connect scale-stage output to bias module
+                    bias_data_in_s[k]  = s_to_b_data[k];
+                    bias_valid_in_s[k] = s_to_b_valid[k];
 
                     // connect bias output to intermediate values
                     b_to_lr_data[k]  = bias_data_out_s[k];
@@ -605,9 +670,9 @@ module vpu_nxn #(
                     bias_data_in_s[k]  = 16'b0;
                     bias_valid_in_s[k] = 1'b0;
 
-                    // connect vpu input to intermediate values
-                    b_to_lr_data[k]  = vpu_data_in[k];
-                    b_to_lr_valid[k] = vpu_valid_in[k];
+                    // connect scale-stage output to intermediate values
+                    b_to_lr_data[k]  = s_to_b_data[k];
+                    b_to_lr_valid[k] = s_to_b_valid[k];
                 end
 
                 // leaky relu module

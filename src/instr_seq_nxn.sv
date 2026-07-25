@@ -193,21 +193,24 @@ module instr_seq_nxn #(
     wire in_loop_body = loop_active && loop_indexed
                         && (fetch_ptr != loop_end);
     // UB read command (bit 1 set) with ptr exactly 0, or ptr exactly 1
-    // at/above wbase, or ptr exactly 7 (item-17a residual read).
+    // at/above wbase, or ptr exactly 7 (item-17a residual read), or ptr
+    // exactly 8 (item-18a scale read).
     wire fetch_ptr0 = (fetch_word[61:53] == 9'd0);
     wire fetch_ptr1 = (fetch_word[61:53] == 9'd1);
     wire fetch_ptr7 = (fetch_word[61:53] == 9'd7);
+    wire fetch_ptr8 = (fetch_word[61:53] == 9'd8);
     // wbase gate: the boundary addr == wbase advances (inclusive);
     // wbase = 0 advances every ptr-1 read (item-15 behavior).
     wire fetch_w_adv = fetch_ptr1 && (fetch_word[52:37] >= loop_wbase);
     wire indexable_read = in_loop_body && fetch_word[1]
-                          && (fetch_ptr0 || fetch_w_adv || fetch_ptr7);
+                          && (fetch_ptr0 || fetch_w_adv || fetch_ptr7
+                              || fetch_ptr8);
     // The word fetched on a jump cycle is the FIRST word of the NEXT
     // pass (loop_iter increments on the same edge), so the transform
     // uses the next-pass index there.
     wire [7:0] emit_iter = loop_jump ? (loop_iter + 1'b1) : loop_iter;
-    // ptr-1 reads stride by stride_w; ptr-0 and ptr-7 reads both
-    // stride by stride_a (residuals are activations).
+    // ptr-1 reads stride by stride_w; ptr-0, ptr-7 and ptr-8 reads all
+    // stride by stride_a (residuals and scale matrices are activations).
     wire [15:0] emit_stride = fetch_ptr1 ? loop_stride_w
                                          : loop_stride_a;
     // 16-bit unsigned add on the addr field; the i*stride offset is

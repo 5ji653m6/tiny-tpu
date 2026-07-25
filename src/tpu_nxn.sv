@@ -74,6 +74,8 @@ module tpu_nxn #(
 
     // UB outputs to VPU
     wire [15:0] ub_rd_bias_data_out [N];
+    wire ub_rd_scale_valid_out [N];   // item 18a: per-lane scale-operand window
+    wire ub_rd_scale_arm_out;         // item 18a: scalar scale-arm flag
     wire [15:0] ub_rd_Y_data_out [N];
     wire [15:0] ub_rd_H_data_out [N];
 
@@ -102,12 +104,23 @@ module tpu_nxn #(
     logic [15:0] bias_d [N];
     logic [15:0] Y_d [N];
     logic [15:0] H_d [N];
+    // Item 18a: the scale stage's per-lane operand window and the scalar
+    // arm flag are registered ONCE here, exactly alongside bias_d, so
+    // scale-valid beat k coincides with systolic beat k and operand beat
+    // k (the scale DATA rides the existing bias_d channel -- no new data
+    // path). The arm flag stays set across phases until a ptr-2/ptr-7
+    // read clears it: a stale-armed phase keeps the stage in the chain
+    // but with every scale_valid beat clear (an exact passthrough).
+    logic scale_valid_d [N];
+    logic scale_arm_d;
     always_ff @(posedge clk) begin
         for (int i = 0; i < N; i++) begin
             bias_d[i] <= ub_rd_bias_data_out[i];
+            scale_valid_d[i] <= ub_rd_scale_valid_out[i];
             Y_d[i]    <= ub_rd_Y_data_out[i];
             H_d[i]    <= ub_rd_H_data_out[i];
         end
+        scale_arm_d <= ub_rd_scale_arm_out;
     end
 
     // SKEW COMPENSATION (gradient descent): the UB's gradient-capture
@@ -191,6 +204,8 @@ module tpu_nxn #(
         .ub_rd_weight_valid_out(ub_rd_weight_valid_out),
 
         .ub_rd_bias_data_out(ub_rd_bias_data_out),
+        .ub_rd_scale_valid_out(ub_rd_scale_valid_out),
+        .ub_rd_scale_arm_out(ub_rd_scale_arm_out),
         .ub_rd_Y_data_out(ub_rd_Y_data_out),
         .ub_rd_H_data_out(ub_rd_H_data_out),
 
@@ -233,6 +248,8 @@ module tpu_nxn #(
         .vpu_valid_in(sys_valid_out),
 
         .bias_scalar_in(bias_d),
+        .scale_valid_in(scale_valid_d),
+        .scale_arm_in(scale_arm_d),
         .lr_leak_factor_in(vpu_leak_factor_in),
         .Y_in(Y_d),
         .inv_batch_size_times_two_in(inv_batch_size_times_two_in),

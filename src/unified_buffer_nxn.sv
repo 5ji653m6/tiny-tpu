@@ -38,6 +38,12 @@ module unified_buffer_nxn #(
     // Read ports from UB to bias modules in VPU
     output wire [15:0] ub_rd_bias_data_out [SYSTOLIC_ARRAY_WIDTH],
 
+    // Item 18a SCALE read (ptr 8): per-lane operand-window valid for
+    // the VPU's head-of-chain scale stage (active only while
+    // rd_bias_scale is set), plus the scalar arm flag itself.
+    output wire ub_rd_scale_valid_out [SYSTOLIC_ARRAY_WIDTH],
+    output wire ub_rd_scale_arm_out,
+
     // Read ports from UB to loss modules (Y matrices) in VPU
     output wire [15:0] ub_rd_Y_data_out [SYSTOLIC_ARRAY_WIDTH],
 
@@ -57,6 +63,7 @@ module unified_buffer_nxn #(
     logic [15:0] ub_rd_weight_data_out_r [SYSTOLIC_ARRAY_WIDTH];  // BUG-TOOLS-1 mirror
     logic ub_rd_weight_valid_out_r [SYSTOLIC_ARRAY_WIDTH];  // BUG-TOOLS-1 mirror
     logic [15:0] ub_rd_bias_data_out_r [SYSTOLIC_ARRAY_WIDTH];  // BUG-TOOLS-1 mirror
+    logic ub_rd_scale_valid_out_r [SYSTOLIC_ARRAY_WIDTH];  // BUG-TOOLS-1 mirror
     logic [15:0] ub_rd_Y_data_out_r [SYSTOLIC_ARRAY_WIDTH];  // BUG-TOOLS-1 mirror
     logic [15:0] ub_rd_H_data_out_r [SYSTOLIC_ARRAY_WIDTH];  // BUG-TOOLS-1 mirror
 
@@ -65,6 +72,8 @@ module unified_buffer_nxn #(
     assign ub_rd_weight_data_out = ub_rd_weight_data_out_r;
     assign ub_rd_weight_valid_out = ub_rd_weight_valid_out_r;
     assign ub_rd_bias_data_out = ub_rd_bias_data_out_r;
+    assign ub_rd_scale_valid_out = ub_rd_scale_valid_out_r;
+    assign ub_rd_scale_arm_out = rd_bias_scale;
     assign ub_rd_Y_data_out = ub_rd_Y_data_out_r;
     assign ub_rd_H_data_out = ub_rd_H_data_out_r;
 
@@ -117,6 +126,11 @@ module unified_buffer_nxn #(
     // the ptr-2 per-column broadcast. Set by a ptr-7 read command,
     // cleared by a ptr-2 read command.
     logic        rd_bias_residual;
+    // Item 18a: ptr-8 SCALE reads share the bias channel, its skew and
+    // the ptr-7 elementwise linear walk. Set by a ptr-8 read command,
+    // cleared by a ptr-2 (bias) or ptr-7 (residual) read command --
+    // each of ptr 2/7/8 re-arms its own exclusive operand mode.
+    logic        rd_bias_scale;
 
     // Internal logic for Y inputs from UB to loss modules in VPU
     logic [15:0] rd_Y_ptr;
@@ -285,6 +299,7 @@ module unified_buffer_nxn #(
                 ub_rd_weight_data_out_r[i] <= '0;
                 ub_rd_weight_valid_out_r[i] <= '0;
                 ub_rd_bias_data_out_r[i] <= '0;
+                ub_rd_scale_valid_out_r[i] <= '0;
                 ub_rd_Y_data_out_r[i] <= '0;
                 ub_rd_H_data_out_r[i] <= '0;
                 value_old_in[i] <= '0;
@@ -309,6 +324,7 @@ module unified_buffer_nxn #(
             rd_bias_col_size <= '0;
             rd_bias_time_counter <= '0;
             rd_bias_residual <= '0;
+            rd_bias_scale <= '0;
 
             rd_Y_ptr <= '0;
             rd_Y_row_size <= '0;
@@ -515,16 +531,24 @@ module unified_buffer_nxn #(
                 for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
                     if(rd_bias_time_counter >= i && rd_bias_time_counter < rd_bias_row_size + i && i < rd_bias_col_size) begin
                         // ptr-2 bias: lane i's value (column i) held for
-                        // every row. ptr-7 residual: elementwise linear
-                        // walk of the row-major matrix at rd_bias_ptr --
-                        // lane i's r-th active beat (r = time_counter - i)
-                        // carries ub_memory[ptr + r*col_size + i]. Same
-                        // per-lane skew and active window either way.
-                        ub_rd_bias_data_out_r[i] <= rd_bias_residual
+                        // every row. ptr-7 residual / ptr-8 scale:
+                        // elementwise linear walk of the row-major matrix
+                        // at rd_bias_ptr -- lane i's r-th active beat
+                        // (r = time_counter - i) carries
+                        // ub_memory[ptr + r*col_size + i]. Same per-lane
+                        // skew and active window either way.
+                        ub_rd_bias_data_out_r[i] <= (rd_bias_residual || rd_bias_scale)
                             ? ub_memory[rd_bias_ptr + (rd_bias_time_counter - i)*rd_bias_col_size + i]
                             : ub_memory[rd_bias_ptr + i];
+                        // Item 18a: the scale stage's per-lane operand
+                        // window rides the same skewed schedule; it is
+                        // asserted only while a ptr-8 read armed the
+                        // scale mode (a stale-armed phase with no
+                        // operand read keeps every beat clear).
+                        ub_rd_scale_valid_out_r[i] <= rd_bias_scale;
                     end else begin
                         ub_rd_bias_data_out_r[i] <= '0;
+                        ub_rd_scale_valid_out_r[i] <= 1'b0;
                     end
                 end
                 rd_bias_time_counter <= rd_bias_time_counter + 1;
@@ -535,6 +559,7 @@ module unified_buffer_nxn #(
                 rd_bias_time_counter <= '0;
                 for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
                     ub_rd_bias_data_out_r[i] <= '0;
+                    ub_rd_scale_valid_out_r[i] <= 1'b0;
                 end
             end
 
@@ -659,6 +684,7 @@ module unified_buffer_nxn #(
                         rd_bias_col_size <= ub_rd_col_size;
                         rd_bias_time_counter <= '0;
                         rd_bias_residual <= 1'b0;
+                        rd_bias_scale <= 1'b0;
                     end
                     7: begin
                         // Item 17a RESIDUAL read: arms the SAME bias
@@ -672,6 +698,26 @@ module unified_buffer_nxn #(
                         rd_bias_col_size <= ub_rd_col_size;
                         rd_bias_time_counter <= '0;
                         rd_bias_residual <= 1'b1;
+                        rd_bias_scale <= 1'b0;
+                    end
+                    8: begin
+                        // Item 18a SCALE read: arms the SAME bias
+                        // operand stream (same skew, same active
+                        // window) with the ptr-7 elementwise linear
+                        // walk, and sets the scale-arm flag that
+                        // routes the VPU's head-of-chain multiply
+                        // stage into the datapath. Issued mid-phase
+                        // like the ptr-7 residual read, it arms only
+                        // that phase's output stream: the scale stage
+                        // then computes C = (A@W) . S. The phase
+                        // pathway stays 0 -- the read alone arms the
+                        // multiply.
+                        rd_bias_ptr <= ub_rd_addr_in;
+                        rd_bias_row_size <= ub_rd_row_size;
+                        rd_bias_col_size <= ub_rd_col_size;
+                        rd_bias_time_counter <= '0;
+                        rd_bias_residual <= 1'b0;
+                        rd_bias_scale <= 1'b1;
                     end
                     3: begin
                         rd_Y_ptr <= ub_rd_addr_in;

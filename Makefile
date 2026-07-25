@@ -535,3 +535,27 @@ test_tpu_nxn_prog_tiled_n4: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=4 MODULE=test_tpu_nxn_prog_tiled_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_tiled_n4.vcd 2>/dev/null || true
+
+# LOOPI sequencer extensions (item 17a sequencer half, agent RTL,
+# red-first): the wbase field (bits [71:56]) freezes ptr-1 reads below
+# it (stationary host weights) while reads at/above it advance;
+# ptr-7 (residual) reads stride by stride_a. wbase=0 = item 15.
+test_instr_seq_nxn_loopi2_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s instr_seq_nxn -s dump -g2012 -Pinstr_seq_nxn.SYSTOLIC_ARRAY_WIDTH=4 $(SOURCES) test/dump_instr_seq_nxn.sv
+	PYTHONOPTIMIZE=$(NOASSERT) INSTR_SEQ_N=4 MODULE=test_instr_seq_nxn_loopi2 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv instr_seq_nxn.vcd waveforms/instr_seq_nxn_loopi2_n4.vcd 2>/dev/null || true
+
+# Residual add (item 17a chip half, agent RTL, red-first): a UB read
+# with ptr=7 streams rows x cols ELEMENTWISE into the bias operand
+# stream (same per-lane skew as the ptr-2 bias schedule); the existing
+# bias stage (pathway bit 3) adds it to the systolic output beat by
+# beat: C = A @ W + R. Three phases pin the contract: radd armed,
+# disarmed (no leak), radd on a chip-produced region (the DiT
+# pattern). Default PROG_DEPTH=256 / UB_WIDTH=128 suffice (183-word
+# program, 128-word image).
+test_tpu_nxn_prog_radd_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=4 $(SOURCES) test/dump_tpu_nxn_prog.sv
+	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=4 MODULE=test_tpu_nxn_prog_radd_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_radd_n4.vcd 2>/dev/null || true

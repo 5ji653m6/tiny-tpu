@@ -483,3 +483,16 @@ test_tpu_nxn_prog_attn_loop_n4: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=4 MODULE=test_tpu_nxn_prog_attn_loop_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_attn_loop_n4.vcd 2>/dev/null || true
+
+# Multi-head attention from ONE loaded program (item 14): H=2 heads,
+# d_model=4, d_head=2, R=4 tokens, per-head Q/K/V projections and the
+# merged output projection O = [O1|O2] @ W_O. No new RTL — the merge
+# emits each head's output transposed so the two 2x4 streams stack
+# contiguously into ([O1|O2])^T, and a transposed read presents the
+# column-concat to the W_O matmul. Needs PROG_DEPTH=1024 (601-word
+# program) and UB_WIDTH=256 (256-word image).
+test_tpu_nxn_prog_mh_attn_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=4 -Pdump.PROG_DEPTH=1024 -Pdump.UB_WIDTH=256 $(SOURCES) test/dump_tpu_nxn_prog.sv
+	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=4 MODULE=test_tpu_nxn_prog_mh_attn_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_mh_attn_n4.vcd 2>/dev/null || true

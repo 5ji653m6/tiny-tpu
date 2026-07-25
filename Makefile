@@ -570,6 +570,34 @@ test_instr_seq_nxn_loopxl_n4: $(SIM_BUILD_DIR)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv instr_seq_nxn.vcd waveforms/instr_seq_nxn_loopxl_n4.vcd 2>/dev/null || true
 
+# Scale-read sequencer extension (item 18a sequencer half, agent RTL,
+# red-first): a UB read with ptr=8 is a SCALE read (the per-element
+# multiply operand for the new VPU scale stage); under LOOPI it
+# advances by i*stride_a like ptr-0/ptr-7 (scale matrices are
+# activation-like per-iteration data).
+test_instr_seq_nxn_scale_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s instr_seq_nxn -s dump -g2012 -Pinstr_seq_nxn.SYSTOLIC_ARRAY_WIDTH=4 $(SOURCES) test/dump_instr_seq_nxn.sv
+	PYTHONOPTIMIZE=$(NOASSERT) INSTR_SEQ_N=4 MODULE=test_instr_seq_nxn_scale $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv instr_seq_nxn.vcd waveforms/instr_seq_nxn_scale_n4.vcd 2>/dev/null || true
+
+# Per-element scale stage (item 18a chip half, agent RTL, red-first):
+# a ptr-8 UB read streams rows x cols ELEMENTWISE into the shared bias
+# operand channel (ptr-7 linear walk) and a NEW multiply stage at the
+# head of the VPU chain consumes it, gated per-beat by a scale-valid
+# the UB drives while its rd_bias_scale flag is set (set by ptr-8,
+# cleared by ptr-2/ptr-7): C = (A @ W) . S. No new pathway bit; the
+# stage is bypassed combinationally when the flag is clear, so pre-18
+# programs are bit- and latency-identical. Three phases pin the
+# contract: armed, stale-armed passthrough, scale-of-chip-region (the
+# adaLN pattern). Default PROG_DEPTH / UB_WIDTH=128 suffice (183-word
+# program, 128-word image).
+test_tpu_nxn_prog_scale_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=4 $(SOURCES) test/dump_tpu_nxn_prog.sv
+	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=4 MODULE=test_tpu_nxn_prog_scale_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_scale_n4.vcd 2>/dev/null || true
+
 # DiT capstone (item 17b2, harness-only): ONE loaded program runs a
 # full diffusion-transformer denoiser block — pre-LN two-head attention
 # with a residual, pre-LN SiLU MLP with a residual, final head

@@ -5,9 +5,12 @@ design". Red-first: this test FAILS until the RTL lands
 (BASELINE_EXCLUDE'd from the loop's baseline sanity until then).
 
 Spec under test (from the item-12 task spec): the program word is
-widened by ONE bit to {ctrl, legacy_word} — prog_wr_data is
-134+17*(N-2) bits with ctrl the MSB. instr_out STAYS 133+17*(N-2) bits
-(the consumer contract is unchanged).
+widened by ONE bit to {ctrl, legacy_word} — ctrl the MSB, instr_out
+STAYS the legacy instruction width (the consumer contract is
+unchanged). Item 13 then widened the instruction word itself by one
+(SiLU pathway bit appended at the top): WORD_W is now 134+17*(N-2),
+so prog_wr_data is 135+17*(N-2) bits and the ctrl escape bit rides
+one position higher.
 
   ctrl = 0: plain instruction word, replayed exactly as in item 9b
             (the ctrl bit is stripped — all pre-item-12 programs
@@ -38,7 +41,7 @@ from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer
 
 N = int(os.environ.get("INSTR_SEQ_N", "4"))
-WORD_W = 133 + 17 * (N - 2)   # legacy instruction width
+WORD_W = 134 + 17 * (N - 2)   # instruction width (item 13: SiLU bit)
 PROG_W = WORD_W + 1           # program word = {ctrl, legacy_word}
 CTRL = 1 << WORD_W            # control-word escape bit (prog-word MSB)
 MASK = (1 << WORD_W) - 1      # instr_out mask (legacy width)
@@ -59,8 +62,8 @@ def reserved_ctrl(op):
 
 
 def pattern(i):
-    """Distinctive nonzero legacy word per index. i in 4..7 sets the
-    TOP legacy bit (bit WORD_W-1) — proves plain words with that bit
+    """Distinctive nonzero word per index. i in 4..7 sets the
+    TOP instruction bit (bit WORD_W-1) — proves plain words with that bit
     set are not mistaken for control words and keep it on instr_out."""
     return (0x5A5A0000 + i * 0x10101 + (i << (WORD_W - 3))) & MASK
 

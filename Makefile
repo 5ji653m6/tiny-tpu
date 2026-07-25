@@ -243,6 +243,14 @@ test_gelu_parent: $(SIM_BUILD_DIR)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv gelu_parent.vcd waveforms/ 2>/dev/null || true
 
+# SiLU module test (roadmap item 13; agent-authored RTL, harness-authored
+# gate test, red-first until the silu RTL lands)
+test_silu_parent: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s silu_parent -s dump -g2012 $(SOURCES) test/dump_silu_parent.sv
+	PYTHONOPTIMIZE=$(NOASSERT) MODULE=test_silu_parent $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv silu_parent.vcd waveforms/ 2>/dev/null || true
+
 # LayerNorm module test (agent-authored RTL, harness-authored gate test)
 test_layernorm_parent: $(SIM_BUILD_DIR)
 	$(IVERILOG) -o $(SIM_VVP) -s layernorm_parent -s dump -g2012 $(SOURCES) test/dump_layernorm_parent.sv

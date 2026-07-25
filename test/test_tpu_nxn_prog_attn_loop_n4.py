@@ -44,7 +44,7 @@ from test_tpu_nxn_prog_n4 import ProgGen, to_fixed, from_fixed
 from test_tpu_nxn_ic_attn_n4 import Q, K, P_RAW, PATHWAY_SOFTMAX
 
 N = int(os.environ.get("TPU_NXN_PROG_N", "4"))
-WORD_W = 133 + 17 * (N - 2)   # legacy instruction width
+WORD_W = 134 + 17 * (N - 2)   # instruction width (item 13: SiLU bit)
 CTRL = 1 << WORD_W            # control-word escape bit (prog-word MSB)
 
 LOOP_COUNT = 3

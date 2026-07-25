@@ -18,7 +18,7 @@ module dump #(
     parameter int PROG_DEPTH = 256
 )();
 
-    localparam int W = 133 + 17*(N-2);
+    localparam int W = 134 + 17*(N-2);   // item 13: SiLU bit
 
     logic clk;
     logic rst;

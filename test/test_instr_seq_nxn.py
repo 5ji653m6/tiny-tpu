@@ -25,7 +25,7 @@ from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer
 
 N = int(os.environ.get("INSTR_SEQ_N", "4"))
-WORD_W = 133 + 17 * (N - 2)
+WORD_W = 134 + 17 * (N - 2)   # item 13: SiLU bit appended at top
 MASK = (1 << WORD_W) - 1
 
 

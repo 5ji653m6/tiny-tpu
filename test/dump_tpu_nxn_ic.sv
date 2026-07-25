@@ -12,8 +12,11 @@ module dump #(
     logic clk;
     logic rst;
 
-    // 133 + 17*(N-2)-bit instruction word (item-8a layout)
-    logic [132+17*(N-2):0] instruction;
+    // 134 + 17*(N-2)-bit instruction word (item-8a layout + the item-13
+    // SiLU pathway bit appended at the top; pre-item-13-RTL iverilog
+    // prunes the MSB — 0 for all old programs — into the 133-based DUT
+    // port with a warning)
+    logic [133+17*(N-2):0] instruction;   // item 13: SiLU bit (MSB)
     logic [15:0] learning_rate_in;
 
     tpu_nxn_ic #(

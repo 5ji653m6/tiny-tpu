@@ -521,3 +521,17 @@ test_tpu_nxn_prog_mh_attn_loopi_n4: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=4 MODULE=test_tpu_nxn_prog_mh_attn_loopi_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_mh_attn_loopi_n4.vcd 2>/dev/null || true
+
+# Tiled matmul via the indexed LOOP (item 16, harness-only): C =
+# A(4x4) @ B(4x12) as three Kx4 column tiles from ONE 52-word body
+# looped 3x — LOOPI(3, 52, stride_a=0, stride_w=16): the weight read
+# advances one 16-word tile per iteration while the activation read
+# re-reads @0 (stride 0 = stationary). Output tiles append at the UB
+# write pointer: C0 @64 / C1 @80 / C2 @96 = blocked-column 4x12.
+# Default PROG_DEPTH=256 / UB_WIDTH=128 suffice (70 words, 112-word
+# image).
+test_tpu_nxn_prog_tiled_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=4 $(SOURCES) test/dump_tpu_nxn_prog.sv
+	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=4 MODULE=test_tpu_nxn_prog_tiled_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_tiled_n4.vcd 2>/dev/null || true

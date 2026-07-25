@@ -66,6 +66,8 @@ SOURCES = src/pe.sv \
 		  src/control_unit_nxn.sv \
 		  src/tpu_nxn_ic.sv \
 		  src/instr_seq_nxn.sv \
+		  src/scale_child.sv \
+		  src/scale_parent.sv \
 		  src/tpu_nxn_prog.sv
 
 # MODIFY 1) variable next to -s 
@@ -616,3 +618,21 @@ test_tpu_nxn_prog_dit_n4: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=4 MODULE=test_tpu_nxn_prog_dit_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_dit_n4.vcd 2>/dev/null || true
+
+# adaLN capstone (item 18b, harness-only): the item-17b2 DiT denoiser
+# block WITH per-timestep adaptive LayerNorm conditioning — scale+shift
+# on both LNs (the 18a scale stage before the bias stage: x.s+sh) and
+# gates on the attention and MLP outputs — iterated T=3 timesteps as
+# ONE loaded program. All 20 phases form ONE 1168-word LOOPI body
+# (LOOPI(3, 1168, sa=320, sw=320, wbase=928)): host weights (160 words)
+# freeze below wbase; the six modulation matrices live as three
+# host-image copies spaced E=320 apart (@176/496/816) and advance one
+# per iteration (ptr-7/ptr-8 reads always stride, even below wbase);
+# host x at wbase-16 closes the sampler recurrence. 1402-word program
+# needs PROG_DEPTH=2048; the 1888-word image needs UB_WIDTH=2048.
+# Golden composes the exact LN model with ew_mul (18a) / ew_add (17a).
+test_tpu_nxn_prog_adaln_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=4 -Pdump.PROG_DEPTH=2048 -Pdump.UB_WIDTH=2048 $(SOURCES) test/dump_tpu_nxn_prog.sv
+	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=4 MODULE=test_tpu_nxn_prog_adaln_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_adaln_n4.vcd 2>/dev/null || true

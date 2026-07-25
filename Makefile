@@ -473,6 +473,18 @@ test_instr_seq_nxn_loop_n4: $(SIM_BUILD_DIR)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv instr_seq_nxn.vcd waveforms/instr_seq_nxn_loop_n4.vcd 2>/dev/null || true
 
+# Sequencer INDEXED LOOP, leaf level (item 15; agent-authored RTL in
+# src/instr_seq_nxn.sv): the item-12 LOOP word plus an indexed flag
+# (bit 16) and per-ptr address strides (stride_a bits [39:24], ptr 0;
+# stride_w bits [55:40], ptr 1) — iteration i emits body read words
+# with addr += i*stride. Flag clear => strides ignored (exact item-12
+# behavior); non-read words and other ptr values pass through.
+test_instr_seq_nxn_loopi_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s instr_seq_nxn -s dump -g2012 -Pinstr_seq_nxn.SYSTOLIC_ARRAY_WIDTH=4 $(SOURCES) test/dump_instr_seq_nxn.sv
+	PYTHONOPTIMIZE=$(NOASSERT) INSTR_SEQ_N=4 MODULE=test_instr_seq_nxn_loopi $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv instr_seq_nxn.vcd waveforms/instr_seq_nxn_loopi_n4.vcd 2>/dev/null || true
+
 # Looped attention from a loaded program (item 12 top half): the
 # phase-1 attention composite (S=Q@K^T, softmax) as a 52-word body
 # repeated 3x by ONE LOOP control word — 62 words total vs 165
@@ -496,3 +508,16 @@ test_tpu_nxn_prog_mh_attn_n4: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=4 MODULE=test_tpu_nxn_prog_mh_attn_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_mh_attn_n4.vcd 2>/dev/null || true
+
+# Indexed-LOOP multi-head attention (item 15 top half): the item-14
+# image + six spelled-out A phases, then ONE 52-word B body (S =
+# Q~1 @ K~1^T, softmax pathway) looped twice by a single LOOPI word
+# with strides 40/40 — iteration 2 reads K~2 @168 / Q~2 @152 with no
+# new program words. P1 @192 / P2 @208 exact vs the item-14 golden;
+# P2's presence proves the addresses advanced (verbatim LOOP would
+# re-emit P1).
+test_tpu_nxn_prog_mh_attn_loopi_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=4 -Pdump.PROG_DEPTH=1024 -Pdump.UB_WIDTH=256 $(SOURCES) test/dump_tpu_nxn_prog.sv
+	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=4 MODULE=test_tpu_nxn_prog_mh_attn_loopi_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_mh_attn_loopi_n4.vcd 2>/dev/null || true

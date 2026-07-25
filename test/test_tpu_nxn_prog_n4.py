@@ -94,8 +94,14 @@ class ProgGen:
         self.prog = []
 
     def hold_word(self):
+        # pathway[3:0] -> [97:94]; pathway[6:4] -> [132:130]; pathway[7]
+        # (silu) -> the MSB 133+17*(N-2) (item 13: the SiLU bit is the
+        # NEW top bit, NOT bit 133 — at N>2 bit 133 is inside the
+        # appended host data-lane field). At N=2 the MSB is 133, so
+        # N=2 programs are bit-identical to the old mapping.
         return ((self.pathway & 0xF) << 94) | (self.inv2b << 98) | \
-               (self.leak << 114) | ((self.pathway >> 4) << 130)
+               (self.leak << 114) | ((self.pathway & 0x70) << 126) | \
+               ((self.pathway >> 7) << (133 + 17 * (N - 2)))
 
     def emit(self, word):
         self.cur = self.hold_word() | word

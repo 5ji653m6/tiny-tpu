@@ -559,3 +559,13 @@ test_tpu_nxn_prog_radd_n4: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=4 MODULE=test_tpu_nxn_prog_radd_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_radd_n4.vcd 2>/dev/null || true
+
+# LOOPI length extension (item 17b1, agent RTL, red-first): the 8-bit
+# len field (max 255) cannot hold a DiT denoiser iteration (the 17b
+# capstone body is 838 words) — len becomes { [23:17], [7:0] } (15-bit,
+# orthogonal to the indexed flag; len_hi=0 = items 12/15/16/17a).
+test_instr_seq_nxn_loopxl_n4: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s instr_seq_nxn -s dump -g2012 -Pinstr_seq_nxn.SYSTOLIC_ARRAY_WIDTH=4 $(SOURCES) test/dump_instr_seq_nxn.sv
+	PYTHONOPTIMIZE=$(NOASSERT) INSTR_SEQ_N=4 MODULE=test_instr_seq_nxn_loopxl $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv instr_seq_nxn.vcd waveforms/instr_seq_nxn_loopxl_n4.vcd 2>/dev/null || true

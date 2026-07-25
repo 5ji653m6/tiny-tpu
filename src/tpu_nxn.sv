@@ -21,7 +21,11 @@
 //    memory contents are identical at N=2.
 
 module tpu_nxn #(
-    parameter int SYSTOLIC_ARRAY_WIDTH = 2
+    parameter int SYSTOLIC_ARRAY_WIDTH = 2,
+    // UB depth in 16-bit words; default 128 preserves the legacy sizing.
+    // Parameterized (item 14) so dump wrappers can deepen it for larger
+    // composite programs (multi-head attention needs 256).
+    parameter int UNIFIED_BUFFER_WIDTH = 128
 )(
     input logic clk,
     input logic rst,
@@ -159,7 +163,8 @@ module tpu_nxn #(
     endgenerate
 
     unified_buffer_nxn #(
-        .SYSTOLIC_ARRAY_WIDTH(SYSTOLIC_ARRAY_WIDTH)
+        .SYSTOLIC_ARRAY_WIDTH(SYSTOLIC_ARRAY_WIDTH),
+        .UNIFIED_BUFFER_WIDTH(UNIFIED_BUFFER_WIDTH)
     ) ub_inst (
         .clk(clk),
         .rst(rst),

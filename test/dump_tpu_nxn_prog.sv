@@ -15,7 +15,9 @@
 
 module dump #(
     parameter int N = 2,
-    parameter int PROG_DEPTH = 256
+    parameter int PROG_DEPTH = 256,
+    // UB depth passthrough (item 14: multi-head attention needs 256)
+    parameter int UB_WIDTH = 128
 )();
 
     localparam int W = 134 + 17*(N-2);   // item 13: SiLU bit
@@ -33,7 +35,8 @@ module dump #(
 
     tpu_nxn_prog #(
         .SYSTOLIC_ARRAY_WIDTH(N),
-        .PROG_DEPTH(PROG_DEPTH)
+        .PROG_DEPTH(PROG_DEPTH),
+        .UNIFIED_BUFFER_WIDTH(UB_WIDTH)
     ) tpu_nxn_prog_inst (
         .clk(clk),
         .rst(rst),

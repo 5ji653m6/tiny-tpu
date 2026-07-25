@@ -29,7 +29,9 @@
 
 module tpu_nxn_prog #(
     parameter int SYSTOLIC_ARRAY_WIDTH = 2,
-    parameter int PROG_DEPTH = 256
+    parameter int PROG_DEPTH = 256,
+    // UB depth in words (item 14: parameterized for larger composites)
+    parameter int UNIFIED_BUFFER_WIDTH = 128
 ) (
     input logic clk,
     input logic rst,
@@ -67,7 +69,8 @@ module tpu_nxn_prog #(
     );
 
     tpu_nxn_ic #(
-        .SYSTOLIC_ARRAY_WIDTH(SYSTOLIC_ARRAY_WIDTH)
+        .SYSTOLIC_ARRAY_WIDTH(SYSTOLIC_ARRAY_WIDTH),
+        .UNIFIED_BUFFER_WIDTH(UNIFIED_BUFFER_WIDTH)
     ) tpu_nxn_ic_inst (
         .clk(clk),
         .rst(rst),

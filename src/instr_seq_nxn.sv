@@ -12,7 +12,12 @@
 //             with the ctrl bit stripped (pre-item-12 programs replay
 //             bit-identically).
 //   ctrl = 1: control word. bits [1:0] select the op:
-//             2'b00 = LOOP: count = bits [15:8], len = bits [7:0].
+//             2'b00 = LOOP: count = bits [15:8], len = the 15-bit
+//             field { bits [23:17], bits [7:0] } (item 17b1: bits
+//             [23:17] ride the previously-unused control-word bits
+//             between the indexed flag and stride_a; every pre-17b1
+//             program has len <= 255, i.e. those bits 0, and replays
+//             bit-identically).
 //             The `len` program words immediately following the LOOP
 //             word are the body; the body executes `count` times IN
 //             TOTAL (count >= 1); count = 0 skips the body entirely.
@@ -45,6 +50,15 @@
 //   non-read words, reads with any other ptr value (5/6 gradient
 //   reads), switch/idle/host-write words -- passes through
 //   bit-identical on every iteration.
+//
+//   Item 17b1 (LOOXL): the loop body length is the 15-bit field
+//   { bits [23:17], bits [7:0] }. The extension is ORTHOGONAL to the
+//   indexed flag: a large body with the flag CLEAR replays verbatim
+//   every pass; with the flag SET all the item-15/17a transforms
+//   apply across the WHOLE body, including reads at body word offsets
+//   past 255. The op decode needs no change: a large-len loop word
+//   has count (bits [15:8]) nonzero, so `~word[0] | (count != 0)`
+//   keeps decoding it as a loop even when the low len byte is odd.
 //
 //   Item 17a (wbase): with the indexed flag SET, a ptr-1 body read
 //   advances by i*stride_w ONLY when its addr >= wbase (the boundary
@@ -88,7 +102,10 @@
 
 module instr_seq_nxn #(
     parameter int SYSTOLIC_ARRAY_WIDTH = 2,
-    parameter int PROG_DEPTH = 256
+    // Item 17b1: the default depth now covers a full extended loop
+    // body (the item-17b capstone needs 838+ words). tpu_nxn_prog
+    // passes its own PROG_DEPTH explicitly and is unaffected.
+    parameter int PROG_DEPTH = 1024
 ) (
     input logic clk,
     input logic rst,
@@ -164,6 +181,9 @@ module instr_seq_nxn #(
     // (the item-12 rule) OR the count field is nonzero (item 15:
     // odd-len bodies alias op bit 0 to 1).
     wire fetch_is_loop = ~fetch_word[0] | (fetch_word[15:8] != '0);
+    // Item 17b1: the loop body length is the 15-bit field
+    // { bits [23:17], bits [7:0] }.
+    wire [14:0] fetch_len = {fetch_word[23:17], fetch_word[7:0]};
 
     // ---- Item 15: indexed-loop (LOOPI) emission transform ----
     // The address advance applies only while the fetched word is a
@@ -244,7 +264,7 @@ module instr_seq_nxn #(
                             loop_active   <= 1'b1;
                             loop_start    <= fetch_ptr + 1'b1;
                             loop_end      <= fetch_ptr + 1'b1
-                                           + fetch_word[7:0];
+                                           + fetch_len;
                             loop_iters    <= fetch_word[15:8] - 1'b1;
                             loop_indexed  <= fetch_word[16];
                             loop_stride_a <= fetch_word[39:24];
@@ -255,7 +275,7 @@ module instr_seq_nxn #(
                         end else begin
                             // LOOP, count = 0: skip the body entirely.
                             rd_ptr <= fetch_ptr + 1'b1
-                                    + fetch_word[7:0];
+                                    + fetch_len;
                         end
                     end else begin
                         // Reserved op: bubble only, no other action.

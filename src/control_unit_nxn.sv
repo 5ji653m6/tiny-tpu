@@ -84,7 +84,11 @@ module control_unit_nxn #(
     // N-wide host lanes: lane 0 = legacy _1 signals, lane 1 = legacy _2
     // signals, lanes k >= 2 decode from the appended top bits.
     output wire ub_wr_host_valid_in [SYSTOLIC_ARRAY_WIDTH],
-    output wire signed [15:0] ub_wr_host_data_in [SYSTOLIC_ARRAY_WIDTH]
+    // Unsigned (like tpu_nxn's matching input and the tpu_nxn_ic
+    // interconnect wire): slang requires exact element-type equality on
+    // unpacked-array port connections; the bits are raw instruction
+    // slices, signedness is transport-irrelevant.
+    output wire [15:0] ub_wr_host_data_in [SYSTOLIC_ARRAY_WIDTH]
 );
 
     localparam int N = SYSTOLIC_ARRAY_WIDTH;
@@ -133,7 +137,7 @@ module control_unit_nxn #(
             // output ports propagate X to connected parent nets; the
             // public ports are wires assigned from these mirrors.
             logic ub_wr_host_valid_in_r [N];             // BUG-TOOLS-1 mirror
-            logic signed [15:0] ub_wr_host_data_in_r [N];  // BUG-TOOLS-1 mirror
+            logic [15:0] ub_wr_host_data_in_r [N];       // BUG-TOOLS-1 mirror
 
             assign ub_wr_host_valid_in = ub_wr_host_valid_in_r;
             assign ub_wr_host_data_in  = ub_wr_host_data_in_r;

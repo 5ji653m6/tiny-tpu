@@ -73,7 +73,6 @@ module unified_buffer_nxn #(
     assign ub_rd_weight_valid_out = ub_rd_weight_valid_out_r;
     assign ub_rd_bias_data_out = ub_rd_bias_data_out_r;
     assign ub_rd_scale_valid_out = ub_rd_scale_valid_out_r;
-    assign ub_rd_scale_arm_out = rd_bias_scale;
     assign ub_rd_Y_data_out = ub_rd_Y_data_out_r;
     assign ub_rd_H_data_out = ub_rd_H_data_out_r;
 
@@ -131,6 +130,9 @@ module unified_buffer_nxn #(
     // cleared by a ptr-2 (bias) or ptr-7 (residual) read command --
     // each of ptr 2/7/8 re-arms its own exclusive operand mode.
     logic        rd_bias_scale;
+    // Assigned here (not with the block above): slang requires
+    // declaration-before-use; iverilog tolerates the forward reference.
+    assign ub_rd_scale_arm_out = rd_bias_scale;
 
     // Internal logic for Y inputs from UB to loss modules in VPU
     logic [15:0] rd_Y_ptr;

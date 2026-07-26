@@ -48,7 +48,21 @@ module pe (
     );
 
     always_ff @(posedge clk or posedge rst) begin
-        if (rst || !pe_enabled) begin
+        // Split rst from !pe_enabled (originally `rst || !pe_enabled`):
+        // slang rejects a compound async-reset condition in always_ff
+        // ("condition cannot be matched to any signal from the event
+        // list"). Both branches clear the same registers, so behavior
+        // is identical.
+        if (rst) begin
+            pe_input_out <= 16'b0;
+            weight_reg_active <= 16'b0;
+            weight_reg_inactive <= 16'b0;
+            pe_valid_out <= 0;
+            pe_weight_out <= 16'b0;
+            pe_switch_out <= 0;
+            pe_psum_out <= 16'b0;
+            pe_overflow_out <= 1'b0;
+        end else if (!pe_enabled) begin
             pe_input_out <= 16'b0;
             weight_reg_active <= 16'b0;
             weight_reg_inactive <= 16'b0;

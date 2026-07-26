@@ -636,3 +636,38 @@ test_tpu_nxn_prog_adaln_n4: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=4 MODULE=test_tpu_nxn_prog_adaln_n4 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_adaln_n4.vcd 2>/dev/null || true
+
+# ===================== Array scaling: N=8 (item 19a) =====================
+# The item-5 N×N parameterization holds with zero RTL changes at N=8 —
+# all five N-generic tests pass at N=8 on first probe (2026-07-26).
+# These targets formalize that probe into the gate; instruction word
+# width at N=8 is 134+17*(8-2) = 236 bits.
+test_systolic_nxn_n8: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s systolic_nxn -s dump -g2012 -Psystolic_nxn.SYSTOLIC_ARRAY_WIDTH=8 $(SOURCES) test/dump_systolic_nxn.sv
+	PYTHONOPTIMIZE=$(NOASSERT) SYSTOLIC_NXN_N=8 MODULE=test_systolic_nxn $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv systolic_nxn.vcd waveforms/systolic_nxn_n8.vcd 2>/dev/null || true
+
+test_unified_buffer_nxn_n8: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=8 $(SOURCES) test/dump_unified_buffer_nxn.sv
+	PYTHONOPTIMIZE=$(NOASSERT) UB_NXN_N=8 MODULE=test_unified_buffer_nxn $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv unified_buffer_nxn.vcd waveforms/unified_buffer_nxn_n8.vcd 2>/dev/null || true
+
+test_vpu_nxn_n8: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=8 $(SOURCES) test/dump_vpu_nxn.sv
+	PYTHONOPTIMIZE=$(NOASSERT) VPU_NXN_N=8 MODULE=test_vpu_nxn $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv vpu_nxn.vcd waveforms/vpu_nxn_n8.vcd 2>/dev/null || true
+
+test_control_unit_nxn_n8: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s control_unit_nxn -s dump -g2012 -Pcontrol_unit_nxn.SYSTOLIC_ARRAY_WIDTH=8 $(SOURCES) test/dump_control_unit_nxn.sv
+	PYTHONOPTIMIZE=$(NOASSERT) CU_NXN_N=8 MODULE=test_control_unit_nxn $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv control_unit_nxn.vcd waveforms/control_unit_nxn_n8.vcd 2>/dev/null || true
+
+test_instr_seq_nxn_n8: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s instr_seq_nxn -s dump -g2012 -Pinstr_seq_nxn.SYSTOLIC_ARRAY_WIDTH=8 $(SOURCES) test/dump_instr_seq_nxn.sv
+	PYTHONOPTIMIZE=$(NOASSERT) INSTR_SEQ_N=8 MODULE=test_instr_seq_nxn $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv instr_seq_nxn.vcd waveforms/instr_seq_nxn_n8.vcd 2>/dev/null || true

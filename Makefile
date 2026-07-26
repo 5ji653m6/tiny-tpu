@@ -683,3 +683,23 @@ test_tpu_nxn_prog_n8: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=8 MODULE=test_tpu_nxn_prog_n8 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_n8.vcd 2>/dev/null || true
+
+# N=8 adaLN capstone (item 19c, harness-only): the item-18b per-
+# timestep-conditioned DiT denoiser block at N=8 (d_model 8, two heads
+# x d_head 4, T=3) as ONE loaded program — the array-scaling evidence.
+# Same 20 phases with N-scaled constants: weight wait 2N+1=17, phase
+# emission 56; the mid-phase operand read keeps switch->tick(2)->
+# ptr-7/8 (the elementwise walk is window-gated by the output stream,
+# so a deeper array only adds arming slack). 1696-word body looped by
+# LOOPI(3,1696,1280,1280,wbase=3648); mod copies spaced E=1280 (@640/
+# 1920/3200); x @3584=wbase-64 closes the sampler recurrence. 2154-word
+# program (PROG_DEPTH=4096), 7488-word image (UB_WIDTH=8192). Stimulus
+# formulas use moduli coprime with both dimensions — a shared factor
+# makes a matrix row/column-constant or periodic and hides addressing
+# bugs (the item-14 O-merge works unchanged: contiguous 4x8 O_h^T
+# blocks form the 8x8 ([O1|O2])^T stack).
+test_tpu_nxn_prog_adaln_n8: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=8 -Pdump.PROG_DEPTH=4096 -Pdump.UB_WIDTH=8192 $(SOURCES) test/dump_tpu_nxn_prog.sv
+	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=8 MODULE=test_tpu_nxn_prog_adaln_n8 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_adaln_n8.vcd 2>/dev/null || true

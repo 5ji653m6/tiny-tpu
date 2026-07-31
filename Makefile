@@ -738,3 +738,15 @@ test_instr_seq_nxn_n16: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) INSTR_SEQ_N=16 MODULE=test_instr_seq_nxn $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv instr_seq_nxn.vcd waveforms/instr_seq_nxn_n16.vcd 2>/dev/null || true
+
+# N=16 loaded-program matmul (item 21b, harness-only): the program
+# buffer datapath at N=16 — host load, weight preload (2N+1=33-cycle
+# wait), activation streaming, VPU emission, UB writeback of a 16x16
+# C = X @ W. 149-word program, 768-word image (needs UB_WIDTH=1024;
+# default PROG_DEPTH=256 suffices). Stimulus is rank-full (a column-
+# constant W would collapse C rows to zero and hide addressing bugs).
+test_tpu_nxn_prog_n16: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=16 -Pdump.UB_WIDTH=1024 $(SOURCES) test/dump_tpu_nxn_prog.sv
+	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=16 MODULE=test_tpu_nxn_prog_n16 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_n16.vcd 2>/dev/null || true

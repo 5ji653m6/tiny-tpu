@@ -157,7 +157,12 @@ async def stream(dut, pathway, lane_data, nbeats, lanes=None):
         dut.vpu_data_in[k].value = 0
         dut.vpu_valid_in[k].value = 0
     dut.vpu_data_pathway.value = pathway  # keep routing until drained
-    await tick(dut, 14)  # drain the full stage chain + re-skew registers
+    await tick(dut, N + 8)  # drain the full stage chain + re-skew
+                            # registers (lane k re-skew delay = k cycles;
+                            # drain must be >= N to accommodate lane N-1
+                            # at arbitrary N — 14 was enough for N<=8,
+                            # short for N>=16; N+8 gives headroom for the
+                            # group-stage pipeline latency)
     dut.vpu_data_pathway.value = 0
     await tick(dut, 2)
 

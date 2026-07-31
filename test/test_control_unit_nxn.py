@@ -140,13 +140,17 @@ async def test_control_unit_nxn_appended_lanes(dut):
         return
 
     # Each appended lane independently: distinctive data, only its valid.
+    # Data value must fit in 16 bits: use 0x1000 * (k-1) so k=15 gives
+    # 0xE000 (not 0x10000 which would overflow and bleed into the next
+    # lane's valid bit — caught at N=16 where k=15 is reached).
     for k in range(2, N):
-        instr = (0x1000 * (k + 1)) << data_bit(k)
+        data_val = 0x1000 * (k - 1)
+        instr = data_val << data_bit(k)
         instr |= 1 << valid_bit(k)
         await drive(dut, instr)
         for j in range(N):
             exp_v = 1 if j == k else 0
-            exp_d = (0x1000 * (k + 1)) if j == k else 0
+            exp_d = data_val if j == k else 0
             assert dut.ub_wr_host_valid_in[j].value.integer == exp_v, (
                 f"lane {k} driven: lane {j} valid "
                 f"{dut.ub_wr_host_valid_in[j].value.integer}, "
@@ -171,10 +175,10 @@ async def test_control_unit_nxn_appended_lanes(dut):
     instr |= 0x1111 << 62                  # data lane 0
     instr |= 0x2222 << 78                  # data lane 1
     for k in range(2, N):
-        instr |= (0x1000 * (k + 1)) << data_bit(k)
+        instr |= (0x1000 * (k - 1)) << data_bit(k)
         instr |= 1 << valid_bit(k)
     await drive(dut, instr)
-    exp_data = [0x1111, 0x2222] + [0x1000 * (k + 1) for k in range(2, N)]
+    exp_data = [0x1111, 0x2222] + [0x1000 * (k - 1) for k in range(2, N)]
     for j in range(N):
         assert dut.ub_wr_host_valid_in[j].value.integer == 1, (
             f"full beat: lane {j} valid not set")

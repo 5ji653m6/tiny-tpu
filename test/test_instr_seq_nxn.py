@@ -53,11 +53,16 @@ async def load_program(dut, words):
 
 async def check_replay(dut, words):
     """Pulse run; instr_out must present words then zeros, busy exactly
-    len(words) cycles starting the cycle after the pulse."""
+    len(words) cycles starting TWO cycles after the pulse (SRAM latency)."""
     dut.run.value = 1
     await tick(dut)
     dut.run.value = 0
     assert dut.busy.value.integer == 1, "busy not set the cycle after run"
+    # SRAM integration: first instruction appears 2 cycles after run.
+    # Cycle after run is a bubble (instr_out=0) while SRAM fetches prog[0].
+    # Don't skip here — the bubble is the first cycle, and we check words[0]
+    # on the NEXT cycle. But we need to wait 1 more cycle for the SRAM read.
+    await tick(dut)  # Wait for SRAM read to complete (bubble -> first word)
     for i, w in enumerate(words):
         got = dut.instr_out.value.integer & MASK
         assert got == w, (
@@ -129,6 +134,8 @@ async def test_instr_seq_nxn_write_ignored_while_busy(dut):
     dut.run.value = 1
     await tick(dut)
     dut.run.value = 0
+    # SRAM integration: first instruction appears 2 cycles after run.
+    await tick(dut)  # Skip bubble cycle
     got0 = dut.instr_out.value.integer & MASK
     assert got0 == words[0]
     dut.prog_wr_en.value = 1

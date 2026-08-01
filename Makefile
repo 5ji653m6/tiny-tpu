@@ -57,6 +57,7 @@ SOURCES = src/pe.sv \
 		  src/silu_parent.sv \
 		  src/layernorm_parent.sv \
 		  src/softmax_parent.sv \
+		  src/sram_macro.sv \
 		  src/systolic_nxn.sv \
 		  src/unified_buffer_nxn.sv \
 		  src/vpu_nxn.sv \

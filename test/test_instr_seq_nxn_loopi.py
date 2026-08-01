@@ -108,6 +108,9 @@ async def check_emission(dut, expected):
     await tick(dut)
     dut.run.value = 0
     assert dut.busy.value.integer == 1, "busy not set the cycle after run"
+    # SRAM integration: the cycle after the run pulse is an all-zero
+    # bubble (SRAM read latency); the stream starts one cycle later.
+    await tick(dut)  # skip SRAM prefetch bubble
     for i, w in enumerate(expected):
         got = dut.instr_out.value.integer & MASK
         assert got == w, (

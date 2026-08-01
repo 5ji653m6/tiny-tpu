@@ -1,11 +1,26 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// Loadable instruction sequencer (roadmap items 9b + 12 + 15): stores
-// a program of {ctrl, 134+17*(N-2)-bit legacy word} program words and
-// replays it, one word per cycle, into an instruction consumer
-// (tpu_nxn_ic). instr_out STAYS the legacy width -- the consumer
-// contract (tpu_nxn_ic.instruction) is unchanged.
+// SRAM-based instruction sequencer (roadmap items 9b + 12 + 15 + SRAM
+// integration). Stores a program of {ctrl, 134+17*(N-2)-bit legacy
+// word} program words in an SRAM macro and replays it, one word per
+// cycle, into an instruction consumer (tpu_nxn_ic). instr_out STAYS
+// the legacy width -- the consumer contract (tpu_nxn_ic.instruction)
+// is unchanged.
+//
+// SRAM integration: prog_mem is an sram_macro (behavioral model of a
+// foundry SRAM). Reads are SYNCHRONOUS (1-cycle latency) instead of
+// combinational, so the sequencer is a 2-stage fetch/execute pipeline:
+// the SRAM read address is presented one cycle BEFORE the word is
+// processed. fetch_ptr_r holds the address of the word currently on
+// sr_rd_data (the execute-stage word); next_addr -- computed
+// combinationally from the execute-stage word and the loop state --
+// drives the SRAM read port and is registered into fetch_ptr_r.
+// Throughput is unchanged (1 word/cycle); the only externally visible
+// difference vs. the pre-SRAM (combinational-read) version is ONE
+// all-zero bubble cycle between the run pulse and the first program
+// word. Area savings: 8192x373 bits x 40T (DFF) -> 6T (SRAM) = 85%
+// reduction at N=16.
 //
 // Program word format (item 12: ONE bit wider than item 9b):
 //   ctrl = 0: plain instruction word. Replayed exactly as in item 9b
@@ -76,7 +91,15 @@
 //   inside a body, nested loops, a body running past the loaded
 //   program.
 //
-// Usage model (unchanged from item 9b):
+//   SRAM-pipeline note: loop bookkeeping (iteration decrement, pass
+//   index increment, loop_active clear) happens when the LAST body
+//   word of a pass is processed (fetch_ptr_r == loop_end-1), one
+//   word-slot earlier than the pre-SRAM version -- the jump redirect
+//   must be known at FETCH time, one cycle before the jumped word is
+//   executed. loop_iter is the 0-based index of the pass currently
+//   being executed and is used directly as the emission index.
+//
+// Usage model:
 //   1. While NOT busy, the host loads the program one word per cycle
 //      (prog_wr_en + prog_wr_data); the write pointer auto-increments
 //      from 0. Writes while busy are IGNORED (a replay in flight is
@@ -84,9 +107,10 @@
 //   2. A 1-cycle `run` pulse while not busy starts the replay IF the
 //      write pointer is nonzero; a run with an empty program is
 //      ignored (busy stays 0). Starting the cycle AFTER the run pulse
-//      is sampled, instr_out presents the expanded emission stream
-//      (LOOP bodies unrolled, one bubble per control word), one word
-//      per cycle, with busy = 1. The cycle after the last emission,
+//      is sampled, busy = 1 and instr_out presents ONE all-zero
+//      bubble cycle (the SRAM read latency), then the expanded
+//      emission stream (LOOP bodies unrolled, one bubble per control
+//      word), one word per cycle. The cycle after the last emission,
 //      instr_out returns to 0 and busy drops.
 //   3. A later run pulse replays the SAME program: running does NOT
 //      clear the write pointer. Loading a different program requires
@@ -128,12 +152,36 @@ module instr_seq_nxn #(
     // Wide enough to represent PROG_DEPTH itself (full memory).
     localparam int PTR_W = $clog2(PROG_DEPTH + 1);
 
-    // Program memory and load pointer
-    logic [PW-1:0] prog_mem [PROG_DEPTH];
+    // SRAM-based program memory (replaces DFF array for 85% area
+    // reduction). Behavioral model synthesizes to a foundry SRAM macro.
+    logic sr_wr_en;
+    logic [15:0] sr_wr_addr;
+    logic [PW-1:0] sr_wr_data;
+    logic [15:0] sr_rd_addr;
+    logic [PW-1:0] sr_rd_data;
+
+    sram_macro #(
+        .WIDTH(PW),
+        .DEPTH(PROG_DEPTH),
+        .NUM_WRITE(1),
+        .NUM_READ(1)
+    ) prog_sram (
+        .clk(clk),
+        .wr_en(sr_wr_en),
+        .wr_addr(sr_wr_addr),
+        .wr_data(sr_wr_data),
+        .rd_addr(sr_rd_addr),
+        .rd_data(sr_rd_data)
+    );
+
     logic [PTR_W-1:0] wr_ptr;
 
-    // Replay read pointer
-    logic [PTR_W-1:0] rd_ptr;
+    // Fetch pipeline: the SRAM read is synchronous, so the address
+    // presented this cycle yields its word on sr_rd_data NEXT cycle.
+    // fetch_ptr_r holds the address of the word currently being
+    // EXECUTED (the word on sr_rd_data). It is registered from
+    // next_addr every cycle, keeping address and data aligned.
+    logic [PTR_W-1:0] fetch_ptr_r;
 
     // Loop state (single level; reset on every run pulse). loop_start
     // is the index of the first body word, loop_end one past the last
@@ -147,7 +195,7 @@ module instr_seq_nxn #(
     // Item-15 LOOPI state: when the LOOP control word's indexed flag
     // (bit [16]) is set, UB read addresses in the body advance per
     // iteration by stride_a (ptr 0) / stride_w (ptr 1). loop_iter is
-    // the 0-based index of the pass currently being fetched.
+    // the 0-based index of the pass currently being executed.
     logic loop_indexed;
     logic [15:0] loop_stride_a;
     logic [15:0] loop_stride_w;
@@ -160,16 +208,9 @@ module instr_seq_nxn #(
     // deasserted so a rst already high at time 0 still clears wr_ptr.
     logic rst_d = 1'b0;
 
-    // A body pass finished this cycle with passes remaining: fetch the
-    // body-start word instead of rd_ptr (iterations are back-to-back,
-    // no bubble between passes).
-    wire loop_jump = loop_active && (rd_ptr == loop_end)
-                                 && (loop_iters != '0);
-    wire [PTR_W-1:0] fetch_ptr = loop_jump ? loop_start : rd_ptr;
-
-    // The word fetched this cycle (async read of the program memory).
-    wire [PW-1:0] fetch_word = prog_mem[fetch_ptr];
-    wire fetch_ctrl = fetch_word[W];
+    // ---- Execute-stage decode (of sr_rd_data, the word fetched LAST
+    // cycle at address fetch_ptr_r) ----
+    wire fetch_ctrl = sr_rd_data[W];
     // Op decode (bits [1:0]): op 2'b00 is LOOP. NOTE: the LOOP len
     // field (bits [7:0]) ALIASES the op bits -- a len=2 body reads as
     // op 2'b10, len=52 as 2'b00, and an odd len (item 15, e.g. len=3)
@@ -180,35 +221,62 @@ module instr_seq_nxn #(
     // clear). Decode: a control word is a LOOP when op bit 0 is clear
     // (the item-12 rule) OR the count field is nonzero (item 15:
     // odd-len bodies alias op bit 0 to 1).
-    wire fetch_is_loop = ~fetch_word[0] | (fetch_word[15:8] != '0);
+    wire fetch_is_loop = ~sr_rd_data[0] | (sr_rd_data[15:8] != '0);
     // Item 17b1: the loop body length is the 15-bit field
     // { bits [23:17], bits [7:0] }.
-    wire [14:0] fetch_len = {fetch_word[23:17], fetch_word[7:0]};
+    wire [14:0] fetch_len = {sr_rd_data[23:17], sr_rd_data[7:0]};
+
+    // ---- Next-address computation (drives the SRAM read port) ----
+    // The word on sr_rd_data next cycle is the word we execute next
+    // cycle, so the read address must be the NEXT program address:
+    //   - idle / done: prefetch address 0 (startup + re-run preload)
+    //   - last body word of a pass with passes remaining: loop_start
+    //     (the jump redirect, known one cycle before the jumped word
+    //     executes)
+    //   - LOOP control word with count = 0: skip the body entirely
+    //   - everything else (plain word, LOOP count >= 1, reserved op,
+    //     last body word of the final pass): sequential +1
+    wire exec_valid = busy && (fetch_ptr_r < wr_ptr);
+    wire last_body = loop_active
+                     && (fetch_ptr_r == (loop_end - 1'b1));
+    wire loop_jump_fetch = last_body && (loop_iters != '0);
+    wire skip_body = exec_valid && fetch_ctrl && fetch_is_loop
+                     && (sr_rd_data[15:8] == '0);
+    wire [PTR_W-1:0] next_addr = !exec_valid ? {PTR_W{1'b0}}
+        : loop_jump_fetch ? loop_start
+        : skip_body ? (fetch_ptr_r + 1'b1 + fetch_len)
+        : (fetch_ptr_r + 1'b1);
+
+    // SRAM port connections (combinational)
+    assign sr_wr_en = prog_wr_en && !busy && (wr_ptr < PROG_DEPTH[PTR_W-1:0]);
+    assign sr_wr_addr = {{(16-PTR_W){1'b0}}, wr_ptr};
+    assign sr_wr_data = prog_wr_data;
+    assign sr_rd_addr = {{(16-PTR_W){1'b0}}, next_addr};
 
     // ---- Item 15: indexed-loop (LOOPI) emission transform ----
-    // The address advance applies only while the fetched word is a
-    // BODY word of an active indexed loop: the word fetched AT
+    // The address advance applies only while the executed word is a
+    // BODY word of an active indexed loop: the word executed AT
     // loop_end is already the first word after the body (final pass
     // complete) and must pass through untouched.
     wire in_loop_body = loop_active && loop_indexed
-                        && (fetch_ptr != loop_end);
+                        && (fetch_ptr_r != loop_end);
     // UB read command (bit 1 set) with ptr exactly 0, or ptr exactly 1
     // at/above wbase, or ptr exactly 7 (item-17a residual read), or ptr
     // exactly 8 (item-18a scale read).
-    wire fetch_ptr0 = (fetch_word[61:53] == 9'd0);
-    wire fetch_ptr1 = (fetch_word[61:53] == 9'd1);
-    wire fetch_ptr7 = (fetch_word[61:53] == 9'd7);
-    wire fetch_ptr8 = (fetch_word[61:53] == 9'd8);
+    wire fetch_ptr0 = (sr_rd_data[61:53] == 9'd0);
+    wire fetch_ptr1 = (sr_rd_data[61:53] == 9'd1);
+    wire fetch_ptr7 = (sr_rd_data[61:53] == 9'd7);
+    wire fetch_ptr8 = (sr_rd_data[61:53] == 9'd8);
     // wbase gate: the boundary addr == wbase advances (inclusive);
     // wbase = 0 advances every ptr-1 read (item-15 behavior).
-    wire fetch_w_adv = fetch_ptr1 && (fetch_word[52:37] >= loop_wbase);
-    wire indexable_read = in_loop_body && fetch_word[1]
+    wire fetch_w_adv = fetch_ptr1 && (sr_rd_data[52:37] >= loop_wbase);
+    wire indexable_read = in_loop_body && sr_rd_data[1]
                           && (fetch_ptr0 || fetch_w_adv || fetch_ptr7
                               || fetch_ptr8);
-    // The word fetched on a jump cycle is the FIRST word of the NEXT
-    // pass (loop_iter increments on the same edge), so the transform
-    // uses the next-pass index there.
-    wire [7:0] emit_iter = loop_jump ? (loop_iter + 1'b1) : loop_iter;
+    // loop_iter is the 0-based pass index of the CURRENT pass: the
+    // increment happens when the LAST body word of the pass executes,
+    // so every body word of pass i (including the last) sees i.
+    wire [7:0] emit_iter = loop_iter;
     // ptr-1 reads stride by stride_w; ptr-0, ptr-7 and ptr-8 reads all
     // stride by stride_a (residuals and scale matrices are activations).
     wire [15:0] emit_stride = fetch_ptr1 ? loop_stride_w
@@ -216,24 +284,24 @@ module instr_seq_nxn #(
     // 16-bit unsigned add on the addr field; the i*stride offset is
     // computed mod 2^16 (offset overflow is out of contract).
     wire [15:0] emit_offset = emit_iter * emit_stride;
-    wire [15:0] indexed_addr = fetch_word[52:37] + emit_offset;
+    wire [15:0] indexed_addr = sr_rd_data[52:37] + emit_offset;
     wire [W-1:0] emit_word = indexable_read
-        ? {fetch_word[W-1:53], indexed_addr, fetch_word[36:0]}
-        : fetch_word[W-1:0];
+        ? {sr_rd_data[W-1:53], indexed_addr, sr_rd_data[36:0]}
+        : sr_rd_data[W-1:0];
 
     always @(posedge clk) begin
         rst_d <= rst;
+
         if (rst) begin
             busy         <= 1'b0;
             instr_out    <= '0;
-            rd_ptr       <= '0;
+            fetch_ptr_r  <= '0;
             loop_active  <= 1'b0;
             loop_indexed <= 1'b0;
             loop_iter    <= '0;
             if (prog_wr_en && (wr_ptr < PROG_DEPTH[PTR_W-1:0])) begin
                 // Write takes priority over the pointer clear so a
                 // program can be loaded while the chip is held in rst.
-                prog_mem[wr_ptr] <= prog_wr_data;
                 wr_ptr           <= wr_ptr + 1'b1;
             end else if (!rst_d) begin
                 // Entry into reset: clear the write pointer exactly once.
@@ -241,82 +309,81 @@ module instr_seq_nxn #(
             end
             // else: hold wr_ptr -- a program loaded during this reset
             // survives until rst releases.
-        end else if (busy) begin
-            // Replay in flight: writes are ignored (no prog_wr_en branch).
-            if (loop_jump) begin
-                // Another body pass: consume one remaining iteration
-                // and advance the 0-based pass index.
-                loop_iters <= loop_iters - 1'b1;
-                loop_iter  <= loop_iter + 1'b1;
-            end else if (loop_active && (rd_ptr == loop_end)) begin
-                // Final pass complete: replay continues with the word
-                // after the body (rd_ptr already points at it).
-                loop_active <= 1'b0;
-            end
+        end else begin
+            // Fetch pipeline: register the address just presented to
+            // the SRAM so next cycle's sr_rd_data stays paired with
+            // its address. Runs every non-reset cycle.
+            fetch_ptr_r <= next_addr;
 
-            if (loop_jump || (rd_ptr < wr_ptr)) begin
-                if (fetch_ctrl) begin
-                    // Control word: exactly ONE all-zero bubble cycle.
-                    instr_out <= '0;
-                    if (fetch_is_loop) begin
-                        if (fetch_word[15:8] != '0) begin
-                            // LOOP, count >= 1: arm the loop state and
-                            // step into the body's first pass. The
-                            // item-15 indexed flag / strides ride
-                            // along; the pass index starts at 0.
-                            loop_active   <= 1'b1;
-                            loop_start    <= fetch_ptr + 1'b1;
-                            loop_end      <= fetch_ptr + 1'b1
-                                           + fetch_len;
-                            loop_iters    <= fetch_word[15:8] - 1'b1;
-                            loop_indexed  <= fetch_word[16];
-                            loop_stride_a <= fetch_word[39:24];
-                            loop_stride_w <= fetch_word[55:40];
-                            loop_wbase    <= fetch_word[71:56];
-                            loop_iter     <= '0;
-                            rd_ptr        <= fetch_ptr + 1'b1;
+            if (busy) begin
+                // Replay in flight: host writes are ignored (sr_wr_en
+                // is gated by !busy and wr_ptr is not touched here).
+                if (exec_valid) begin
+                    // Loop bookkeeping on the LAST body word of a
+                    // pass (one word-slot earlier than the pre-SRAM
+                    // version -- the jump must be known at fetch time).
+                    if (last_body) begin
+                        if (loop_iters != '0) begin
+                            // Another body pass follows.
+                            loop_iters <= loop_iters - 1'b1;
+                            loop_iter  <= loop_iter + 1'b1;
                         end else begin
-                            // LOOP, count = 0: skip the body entirely.
-                            rd_ptr <= fetch_ptr + 1'b1
-                                    + fetch_len;
+                            // Final pass complete: the next word (at
+                            // loop_end) is the first word after the body.
+                            loop_active <= 1'b0;
                         end
+                    end
+
+                    if (fetch_ctrl) begin
+                        // Control word: exactly ONE all-zero bubble cycle.
+                        instr_out <= '0;
+                        if (fetch_is_loop && (sr_rd_data[15:8] != '0)) begin
+                            // LOOP, count >= 1: arm the loop state and
+                            // step into the body's first pass (the
+                            // sequential next_addr lands on the first
+                            // body word).
+                            loop_active   <= 1'b1;
+                            loop_start    <= fetch_ptr_r + 1'b1;
+                            loop_end      <= fetch_ptr_r + 1'b1 + fetch_len;
+                            loop_iters    <= sr_rd_data[15:8] - 1'b1;
+                            loop_indexed  <= sr_rd_data[16];
+                            loop_stride_a <= sr_rd_data[39:24];
+                            loop_stride_w <= sr_rd_data[55:40];
+                            loop_wbase    <= sr_rd_data[71:56];
+                            loop_iter     <= '0;
+                        end
+                        // LOOP count = 0: no state; next_addr already
+                        // skips the body. Reserved ops: bubble only.
                     end else begin
-                        // Reserved op: bubble only, no other action.
-                        rd_ptr <= fetch_ptr + 1'b1;
+                        // Plain instruction word: replay with ctrl stripped.
+                        instr_out <= emit_word;
                     end
                 end else begin
-                    // Plain instruction word: replay with ctrl
-                    // stripped (the LOOPI address advance is applied
-                    // when it is an indexable body read).
-                    instr_out <= emit_word;
-                    rd_ptr    <= fetch_ptr + 1'b1;
+                    // fetch_ptr_r walked past the loaded program: the
+                    // last emission was presented last cycle. Return
+                    // to idle (next_addr already prefetching word 0
+                    // for a potential re-run).
+                    instr_out   <= '0;
+                    busy        <= 1'b0;
+                    loop_active <= 1'b0;
                 end
             end else begin
-                // Last emission was presented last cycle: return to idle.
-                instr_out   <= '0;
-                busy        <= 1'b0;
-                rd_ptr      <= '0;
-                loop_active <= 1'b0;
-            end
-        end else begin
-            // Idle: host may load the program and/or pulse run.
-            if (prog_wr_en && (wr_ptr < PROG_DEPTH[PTR_W-1:0])) begin
-                prog_mem[wr_ptr] <= prog_wr_data;
-                wr_ptr           <= wr_ptr + 1'b1;
-            end
-            if (run && (wr_ptr != '0)) begin
-                // Run pulse sampled with a non-empty program: present
-                // prog[0] the very next cycle (this NBA update), with
-                // busy = 1. The write pointer is NOT cleared, so a
-                // later run replays the same program; the loop state
-                // -- iteration counter included -- is reset so the
-                // re-run replays loops identically.
-                busy         <= 1'b1;
-                instr_out    <= prog_mem[0][W-1:0];
-                rd_ptr       <= {{(PTR_W-1){1'b0}}, 1'b1};
-                loop_active  <= 1'b0;
-                loop_indexed <= 1'b0;
-                loop_iter    <= '0;
+                // Idle: host may load the program and/or pulse run.
+                if (prog_wr_en && (wr_ptr < PROG_DEPTH[PTR_W-1:0])) begin
+                    wr_ptr           <= wr_ptr + 1'b1;
+                end
+                if (run && (wr_ptr != '0)) begin
+                    // Run pulse sampled with a non-empty program. The
+                    // idle prefetch has already been reading address 0,
+                    // so the first program word is on sr_rd_data next
+                    // cycle; instr_out presents ONE all-zero bubble
+                    // cycle first (the SRAM read latency).
+                    busy         <= 1'b1;
+                    instr_out    <= '0;
+                    loop_active  <= 1'b0;
+                    loop_indexed <= 1'b0;
+                    loop_iter    <= '0;
+                end
             end
         end
     end

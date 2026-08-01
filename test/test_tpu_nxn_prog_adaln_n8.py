@@ -528,7 +528,7 @@ async def test_tpu_nxn_prog_adaln_n8(dut):
 
     # ---- final UB image: all 7488 words exact ----
     for a in range(IMG_WORDS):
-        got = nxn.ub_inst.ub_memory[a].value.integer & 0xFFFF
+        got = nxn.ub_inst.ub_sram.mem[a].value.integer & 0xFFFF
         want = GOLD[a] & 0xFFFF
         assert got == want, (
             f"mem[{a}] = {from_fixed(got):+.4f}, expected "

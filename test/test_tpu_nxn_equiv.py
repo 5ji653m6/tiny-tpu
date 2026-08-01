@@ -611,7 +611,7 @@ async def test_tpu(dut):
     mismatches = []
     for a in range(128):
         lw = dut.tpu_legacy.ub_inst.ub_memory[a].value.integer & 0xFFFF
-        nw = dut.tpu_nxn_inst.ub_inst.ub_memory[a].value.integer & 0xFFFF
+        nw = dut.tpu_nxn_inst.ub_inst.ub_sram.mem[a].value.integer & 0xFFFF
         if lw != nw:
             mismatches.append(
                 f"mem[{a}]: legacy={lw:#06x} nxn={nw:#06x}")

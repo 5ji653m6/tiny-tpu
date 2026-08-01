@@ -199,7 +199,7 @@ async def test_tpu_nxn_prog_mh_attn_loopi_n4(dut):
 
     # ---- UB image words 0..223 exact (host + A streams + P1/P2) ----
     for a in range(224):
-        got = nxn.ub_inst.ub_memory[a].value.integer & 0xFFFF
+        got = nxn.ub_inst.ub_sram.mem[a].value.integer & 0xFFFF
         want = GOLD[a] & 0xFFFF
         assert got == want, (
             f"mem[{a}] = {from_fixed(got):+.4f}, expected "

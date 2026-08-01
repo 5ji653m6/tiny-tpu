@@ -190,7 +190,7 @@ async def test_tpu_nxn_forward_n4(dut):
             f"(H column {j})")
 
     # ---- placement check: 16 H words sit right after the host image --
-    region = [nxn.ub_inst.ub_memory[a].value.integer & 0xFFFF
+    region = [nxn.ub_inst.ub_sram.mem[a].value.integer & 0xFFFF
               for a in range(36, 52)]
     assert sorted(region) == sorted(to_fixed(v) for v in H.flatten()), (
         f"UB[36:52] = {[f'{from_fixed(w):+.4f}' for w in region]}, "

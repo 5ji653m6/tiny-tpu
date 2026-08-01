@@ -1,6 +1,29 @@
 `timescale 1ns/1ps
 `default_nettype none
 
+// Unified buffer with SRAM-macro storage (see docs/SRAM_INTEGRATION.md).
+//
+// The DFF array was replaced by ONE behavioral multi-port SRAM macro:
+//   - 2N write ports: [0,N) gradient-descent writeback (highest priority,
+//     matching the DFF version's last-NBA-wins order), [N,2N) per-lane
+//     merged VPU-stream/host writes (mutually exclusive per lane there).
+//   - 6N read ports: N-lane groups for input (ptr 0), weight (ptr 1),
+//     bias/residual/scale (ptr 2/7/8), Y (ptr 3), H (ptr 4), and the
+//     mutually-exclusive gradient pair (ptr 5/6) sharing one group.
+//
+// Timing is IDENTICAL to the DFF version: the SRAM's synchronous read
+// (1-cycle latency) takes the place of the old per-lane output data
+// registers. Every per-channel address walk is computed combinationally
+// from the current state (the same arithmetic the DFF version performed
+// inside always_ff) and presented to the SRAM this cycle; the registered
+// SRAM output is consumed next cycle alongside the valid/window registers,
+// which are updated on the same conditions as before. Writes were and stay
+// synchronous. Read-during-write to the same address returns the OLD data
+// in both versions (pre-edge sample), so no consumer sees a difference.
+//
+// Reset: CLEAR_ON_RESET=1 zeroes the array on rst (DFF parity, behavioral
+// model only — a foundry macro swap needs a boot-time scrub instead).
+
 module unified_buffer_nxn #(
     parameter int UNIFIED_BUFFER_WIDTH = 128,
     parameter int SYSTOLIC_ARRAY_WIDTH = 2
@@ -76,7 +99,51 @@ module unified_buffer_nxn #(
     assign ub_rd_Y_data_out = ub_rd_Y_data_out_r;
     assign ub_rd_H_data_out = ub_rd_H_data_out_r;
 
-    logic [15:0] ub_memory [0:UNIFIED_BUFFER_WIDTH-1];
+    // ------------------------------------------------------------------
+    // SRAM storage (replaces the DFF array). Read-port group bases:
+    //   GRP_IN  ptr 0: systolic input (left)
+    //   GRP_W   ptr 1: systolic weight (top)
+    //   GRP_B   ptr 2/7/8: bias / residual / scale (shared channel)
+    //   GRP_Y   ptr 3: loss Y
+    //   GRP_H   ptr 4: activation derivative H
+    //   GRP_G   ptr 5/6: gradient bias / weight (mutually exclusive)
+    // ------------------------------------------------------------------
+    localparam int GRP_IN = 0;
+    localparam int GRP_W  = 1*SYSTOLIC_ARRAY_WIDTH;
+    localparam int GRP_B  = 2*SYSTOLIC_ARRAY_WIDTH;
+    localparam int GRP_Y  = 3*SYSTOLIC_ARRAY_WIDTH;
+    localparam int GRP_H  = 4*SYSTOLIC_ARRAY_WIDTH;
+    localparam int GRP_G  = 5*SYSTOLIC_ARRAY_WIDTH;
+
+    logic [2*SYSTOLIC_ARRAY_WIDTH-1:0]    sr_wr_en;
+    logic [2*SYSTOLIC_ARRAY_WIDTH*16-1:0] sr_wr_addr;
+    logic [2*SYSTOLIC_ARRAY_WIDTH*16-1:0] sr_wr_data;
+    logic [6*SYSTOLIC_ARRAY_WIDTH*16-1:0] sr_rd_addr;
+    logic [6*SYSTOLIC_ARRAY_WIDTH*16-1:0] sr_rd_data;
+
+    sram_macro #(
+        .WIDTH(16),
+        .DEPTH(UNIFIED_BUFFER_WIDTH),
+        .NUM_WRITE(2*SYSTOLIC_ARRAY_WIDTH),
+        .NUM_READ(6*SYSTOLIC_ARRAY_WIDTH),
+        .CLEAR_ON_RESET(1)
+    ) ub_sram (
+        .clk(clk),
+        .rst(rst),
+        .wr_en(sr_wr_en),
+        .wr_addr(sr_wr_addr),
+        .wr_data(sr_wr_data),
+        .rd_addr(sr_rd_addr),
+        .rd_data(sr_rd_data)
+    );
+
+    // Test observability: the full-chip gate suites read the buffer contents
+    // hierarchically via VPI as `ub_inst.ub_sram.mem[a]` (pull-based reads,
+    // zero sim cost). Do NOT reintroduce a continuous-assign `ub_memory`
+    // alias here: an `assign alias[i] = ub_sram.mem[i]` generate loop makes
+    // every mem write wake all DEPTH alias functors (vvp_fun_arrayport_sa),
+    // which is O(DEPTH^2) per CLEAR_ON_RESET cycle — measured 172x slowdown
+    // at N=16 (0.24s -> 41s for 60 cycles), multi-hour at real test length.
 
     logic [15:0] wr_ptr;
 
@@ -144,35 +211,36 @@ module unified_buffer_nxn #(
     logic [15:0] rd_H_ptr;
     logic [15:0] rd_H_row_size;
     logic [15:0] rd_H_col_size;
-    logic [15:0] rd_H_time_counter; 
+    logic [15:0] rd_H_time_counter;
 
     // Internal logic for bias gradient descent inputs from UB to gradient descent modules
     logic [15:0] rd_grad_bias_ptr;
     logic [15:0] rd_grad_bias_row_size;
     logic [15:0] rd_grad_bias_col_size;
-    logic [15:0] rd_grad_bias_time_counter; 
+    logic [15:0] rd_grad_bias_time_counter;
 
     // Internal logic for weight gradient descent inputs from UB to gradient descent modules
     logic [15:0] rd_grad_weight_ptr;
     logic [15:0] rd_grad_weight_row_size;
     logic [15:0] rd_grad_weight_col_size;
-    logic [15:0] rd_grad_weight_time_counter; 
+    logic [15:0] rd_grad_weight_time_counter;
 
     // Internal logic for gradient descent inputs from UB to gradient descent modules
     logic [15:0] value_old_in [SYSTOLIC_ARRAY_WIDTH];
     logic grad_descent_valid_in [SYSTOLIC_ARRAY_WIDTH];
     logic [15:0] value_updated_out [SYSTOLIC_ARRAY_WIDTH];
     logic grad_descent_done_out [SYSTOLIC_ARRAY_WIDTH];
-    
+
     // Where to write gradients to UB
     logic [15:0] grad_descent_ptr;
 
     // Whether the gradients are biases or weights (0 for biases, 1 for weights)
     logic grad_bias_or_weight;
 
-    // BUG-UB-1 fix: within-cycle tracking variables replacing blocking assignments in always block.
-    // Each _next variable is set with blocking (=) to track intermediate address within one clock
-    // edge, then written to the corresponding register with a single non-blocking (<=).
+    // Combinational next-address / next-state signals. The DFF version
+    // computed these with blocking assignments inside always_ff (BUG-UB-1
+    // _next discipline); with the SRAM they are generated one cycle ahead
+    // in always_comb and registered by the SRAM read port itself.
     logic [15:0]        wr_ptr_next;
     logic [15:0]        rd_input_ptr_next;
     logic signed [15:0] rd_weight_ptr_next;
@@ -194,6 +262,36 @@ module unified_buffer_nxn #(
     // stream-valid flag is computed with an explicit loop.
     logic               wr_any_valid;
 
+    // Per-lane active-window flags (combinational). The same flags gate the
+    // SRAM address lanes this cycle and are registered into the valid/window
+    // bits that qualify the returning data next cycle.
+    logic in_win  [SYSTOLIC_ARRAY_WIDTH];
+    logic wt_win  [SYSTOLIC_ARRAY_WIDTH];
+    logic b_win   [SYSTOLIC_ARRAY_WIDTH];
+    logic y_win   [SYSTOLIC_ARRAY_WIDTH];
+    logic h_win   [SYSTOLIC_ARRAY_WIDTH];
+    logic g_win   [SYSTOLIC_ARRAY_WIDTH];
+
+    // Registered operand windows for the channels without a valid output
+    // (bias/Y/H feed VPU stages directly; grad feeds value_old_in). They
+    // zero-mask the returning SRAM data exactly where the DFF version
+    // registered '0 into the data output.
+    logic bias_win_r [SYSTOLIC_ARRAY_WIDTH];
+    logic y_win_r    [SYSTOLIC_ARRAY_WIDTH];
+    logic h_win_r    [SYSTOLIC_ARRAY_WIDTH];
+    logic g_win_r    [SYSTOLIC_ARRAY_WIDTH];
+
+    // Channel-active conditions (identical to the DFF version's per-section
+    // guards; gw_cond is reached only when gb_active is false, matching the
+    // original if/else-if chain).
+    wire in_active = (rd_input_time_counter + 1 < rd_input_row_size + rd_input_col_size);
+    wire wt_active = (rd_weight_time_counter + 1 < rd_weight_row_size + rd_weight_col_size);
+    wire b_active  = (rd_bias_time_counter + 1 < rd_bias_row_size + rd_bias_col_size);
+    wire y_active  = (rd_Y_time_counter + 1 < rd_Y_row_size + rd_Y_col_size);
+    wire h_active  = (rd_H_time_counter + 1 < rd_H_row_size + rd_H_col_size);
+    wire gb_active = (rd_grad_bias_time_counter + 1 < rd_grad_bias_row_size + rd_grad_bias_col_size);
+    wire gw_cond   = (rd_grad_weight_time_counter + 1 < rd_grad_weight_row_size + rd_grad_weight_col_size);
+
     always_comb begin
         wr_any_valid = 1'b0;
         for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
@@ -201,6 +299,7 @@ module unified_buffer_nxn #(
         end
         wr_stream_w_eff = wr_stream_active_d ? wr_stream_width_snap
                                              : wr_stream_width;
+        wr_stream_base_comb = wr_stream_active_d ? wr_stream_base : wr_ptr;
     end
 
     // Generalized shared-pointer walk helpers (valid for ANY column count C = 1..N,
@@ -285,26 +384,233 @@ module unified_buffer_nxn #(
                 grad_descent_valid_in[i] = 1'b0;
             end
         end
-    end 
+    end
+
+    // ------------------------------------------------------------------
+    // Combinational SRAM port assembly: per-lane read addresses (the walk
+    // arithmetic below is verbatim what the DFF version ran inside
+    // always_ff), per-lane write ports, and the end-of-cycle pointer
+    // corrections. Everything is defaulted first (no latches).
+    // ------------------------------------------------------------------
+    always_comb begin
+        // Defaults
+        sr_wr_en   = '0;
+        sr_wr_addr = '0;
+        sr_wr_data = '0;
+        sr_rd_addr = '0;
+        wr_ptr_next = wr_ptr;
+        rd_input_ptr_next = rd_input_ptr;
+        rd_weight_ptr_next = rd_weight_ptr;
+        rd_weight_lanes_read = 0;
+        rd_Y_ptr_next = rd_Y_ptr;
+        rd_H_ptr_next = rd_H_ptr;
+        rd_grad_weight_ptr_next = rd_grad_weight_ptr;
+        for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
+            in_win[i] = 1'b0;
+            wt_win[i] = 1'b0;
+            b_win[i]  = 1'b0;
+            y_win[i]  = 1'b0;
+            h_win[i]  = 1'b0;
+            g_win[i]  = 1'b0;
+        end
+
+        // ---- WRITE PORTS ----
+        // Ports [0,N): gradient-descent writeback. Highest SRAM priority,
+        // matching the DFF version where these NBAs came last in the
+        // always_ff block (last write wins).
+        for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
+            sr_wr_en[i] = grad_descent_done_out[i];
+            if (grad_bias_or_weight) begin
+                // BUG-UB-3: row-major writeback — done beat (r, i) of lane i
+                // updates ub_memory[grad_descent_ptr + r*w + i].
+                sr_wr_addr[i*16 +: 16] = grad_descent_ptr + grad_done_cnt[i]*wr_stream_w_eff + i;
+            end else begin
+                sr_wr_addr[i*16 +: 16] = grad_descent_ptr + i;
+            end
+            sr_wr_data[i*16 +: 16] = value_updated_out[i];
+        end
+
+        // Ports [N,2N): merged VPU-stream / host writes (the DFF version's
+        // per-lane if/else-if makes them mutually exclusive). Host walk
+        // decrements so the highest-index host-valid lane lands at the
+        // lowest address (row-major host order, BUG-UB-2 note).
+        for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
+            sr_wr_en[SYSTOLIC_ARRAY_WIDTH + i] = ub_wr_valid_in[i] | ub_wr_host_valid_in[i];
+            if (ub_wr_valid_in[i]) begin
+                // BUG-UB-3: VPU output streams are placed row-major — beat
+                // (row r, col i) lands at stream_base + r*w + i.
+                sr_wr_addr[(SYSTOLIC_ARRAY_WIDTH + i)*16 +: 16] =
+                    wr_stream_base_comb + wr_beat_cnt[i]*wr_stream_w_eff + i;
+                sr_wr_data[(SYSTOLIC_ARRAY_WIDTH + i)*16 +: 16] = ub_wr_data_in[i];
+            end else begin
+                sr_wr_addr[(SYSTOLIC_ARRAY_WIDTH + i)*16 +: 16] = wr_ptr_next;
+                sr_wr_data[(SYSTOLIC_ARRAY_WIDTH + i)*16 +: 16] = ub_wr_host_data_in[i];
+                if (ub_wr_host_valid_in[i]) begin
+                    wr_ptr_next = wr_ptr_next + 1;
+                end
+            end
+        end
+
+        // ---- READ PORTS ----
+        // GRP_IN: input to the left of the systolic array (ptr 0)
+        if (in_active) begin
+            if (rd_input_transpose) begin
+                // For transposed matrices (for loop should increment)
+                for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
+                    if (rd_input_time_counter >= i && rd_input_time_counter < rd_input_row_size + i && i < rd_input_col_size) begin
+                        in_win[i] = 1'b1;
+                        sr_rd_addr[(GRP_IN + i)*16 +: 16] = rd_input_ptr_next;
+                        rd_input_ptr_next = rd_input_ptr_next + (rd_input_row_size - 1);
+                    end
+                end
+                rd_input_ptr_next = rd_input_ptr_next + ascending_walk_correction(rd_input_row_size, rd_input_col_size, rd_input_time_counter);
+            end else begin
+                // For untransposed matrices (for loop should decrement)
+                for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
+                    if (rd_input_time_counter >= i && rd_input_time_counter < rd_input_row_size + i && i < rd_input_col_size) begin
+                        in_win[i] = 1'b1;
+                        sr_rd_addr[(GRP_IN + i)*16 +: 16] = rd_input_ptr_next;
+                        rd_input_ptr_next = rd_input_ptr_next + (rd_input_col_size - 1);
+                    end
+                end
+                rd_input_ptr_next = rd_input_ptr_next + descending_walk_correction(rd_input_col_size, rd_input_row_size, rd_input_time_counter);
+            end
+        end
+
+        // GRP_W: weights to the top of the systolic array (ptr 1)
+        if (wt_active) begin
+            if (rd_weight_transpose) begin
+                // For transposed matrices (for loop should increment)
+                for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
+                    if (rd_weight_time_counter >= i && rd_weight_time_counter < rd_weight_row_size + i && i < rd_weight_col_size) begin
+                        wt_win[i] = 1'b1;
+                        sr_rd_addr[(GRP_W + i)*16 +: 16] = rd_weight_ptr_next;
+                        rd_weight_ptr_next = rd_weight_ptr_next + rd_weight_skip_size;
+                        rd_weight_lanes_read = rd_weight_lanes_read + 1;
+                    end
+                end
+                // Generalized end-of-cycle correction (any column count C, not just C=2):
+                // undo all L lane skips from this cycle, step back 1 element, and once the
+                // leading lanes start retiring (t >= C-1) hop forward one row (C+1 = skip).
+                // C is the original command col size, i.e. skip-1; equals the legacy
+                // -(skip+1) constant at C=2 while any reads remain.
+                rd_weight_ptr_next = rd_weight_ptr_next - rd_weight_skip_size*rd_weight_lanes_read - 1
+                                   + ((rd_weight_time_counter >= rd_weight_skip_size - 2) ? rd_weight_skip_size : 0);
+            end else begin
+                // For untransposed matrices (for loop should decrement)
+                for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
+                    if (rd_weight_time_counter >= i && rd_weight_time_counter < rd_weight_row_size + i && i < rd_weight_col_size) begin
+                        wt_win[i] = 1'b1;
+                        sr_rd_addr[(GRP_W + i)*16 +: 16] = rd_weight_ptr_next;
+                        rd_weight_ptr_next = rd_weight_ptr_next - rd_weight_skip_size;
+                        rd_weight_lanes_read = rd_weight_lanes_read + 1;
+                    end
+                end
+                // Generalized end-of-cycle correction (any column count C, not just C=2):
+                // undo all L lane skips from this cycle, step back one row (C = skip-1),
+                // and while the trailing lanes are still joining (t < C-1) hop forward one
+                // row plus one element (C+1 = skip). C is the original command col size;
+                // equals the legacy +(skip+1) constant at C=2 while any reads remain.
+                rd_weight_ptr_next = rd_weight_ptr_next + rd_weight_skip_size*rd_weight_lanes_read - (rd_weight_skip_size - 1)
+                                   + ((rd_weight_time_counter < rd_weight_skip_size - 2) ? rd_weight_skip_size : 0);
+            end
+        end
+
+        // GRP_B: bias (ptr 2) / residual (ptr 7) / scale (ptr 8) shared channel
+        if (b_active) begin
+            for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
+                if (rd_bias_time_counter >= i && rd_bias_time_counter < rd_bias_row_size + i && i < rd_bias_col_size) begin
+                    b_win[i] = 1'b1;
+                    // ptr-2 bias: lane i's value (column i) held for every
+                    // row. ptr-7 residual / ptr-8 scale: elementwise linear
+                    // walk of the row-major matrix at rd_bias_ptr -- lane i's
+                    // r-th active beat (r = time_counter - i) carries
+                    // ub_memory[ptr + r*col_size + i]. Same per-lane skew and
+                    // active window either way.
+                    sr_rd_addr[(GRP_B + i)*16 +: 16] = (rd_bias_residual || rd_bias_scale)
+                        ? rd_bias_ptr + (rd_bias_time_counter - i)*rd_bias_col_size + i
+                        : rd_bias_ptr + i;
+                end
+            end
+        end
+
+        // GRP_Y: loss Y inputs (ptr 3)
+        if (y_active) begin
+            for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
+                if (rd_Y_time_counter >= i && rd_Y_time_counter < rd_Y_row_size + i && i < rd_Y_col_size) begin
+                    y_win[i] = 1'b1;
+                    sr_rd_addr[(GRP_Y + i)*16 +: 16] = rd_Y_ptr_next;
+                    rd_Y_ptr_next = rd_Y_ptr_next + (rd_Y_col_size - 1);
+                end
+            end
+            rd_Y_ptr_next = rd_Y_ptr_next + descending_walk_correction(rd_Y_col_size, rd_Y_row_size, rd_Y_time_counter);
+        end
+
+        // GRP_H: activation derivative H inputs (ptr 4)
+        if (h_active) begin
+            for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
+                if (rd_H_time_counter >= i && rd_H_time_counter < rd_H_row_size + i && i < rd_H_col_size) begin
+                    h_win[i] = 1'b1;
+                    sr_rd_addr[(GRP_H + i)*16 +: 16] = rd_H_ptr_next;
+                    rd_H_ptr_next = rd_H_ptr_next + (rd_H_col_size - 1);
+                end
+            end
+            rd_H_ptr_next = rd_H_ptr_next + descending_walk_correction(rd_H_col_size, rd_H_row_size, rd_H_time_counter);
+        end
+
+        // GRP_G: gradient-descent old-value reads (ptr 5 bias / ptr 6
+        // weight). The two channels are mutually exclusive (the DFF
+        // version's if/else-if), so they share one lane group.
+        if (gb_active) begin
+            for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
+                if (rd_grad_bias_time_counter >= i && rd_grad_bias_time_counter < rd_grad_bias_row_size + i && i < rd_grad_bias_col_size) begin
+                    g_win[i] = 1'b1;
+                    sr_rd_addr[(GRP_G + i)*16 +: 16] = rd_grad_bias_ptr + i;
+                end
+            end
+        end else if (gw_cond) begin
+            for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
+                if (rd_grad_weight_time_counter >= i && rd_grad_weight_time_counter < rd_grad_weight_row_size + i && i < rd_grad_weight_col_size) begin
+                    g_win[i] = 1'b1;
+                    sr_rd_addr[(GRP_G + i)*16 +: 16] = rd_grad_weight_ptr_next;
+                    rd_grad_weight_ptr_next = rd_grad_weight_ptr_next + (rd_grad_weight_col_size - 1);
+                end
+            end
+            rd_grad_weight_ptr_next = rd_grad_weight_ptr_next + descending_walk_correction(rd_grad_weight_col_size, rd_grad_weight_row_size, rd_grad_weight_time_counter);
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Output data path: the SRAM's registered output is the data word for
+    // the address presented LAST cycle; the registered valid/window bits
+    // (same conditions, registered on the same edge) qualify it. Inactive
+    // lanes read as zero, exactly as the DFF version's '0 data NBAs.
+    // ------------------------------------------------------------------
+    always_comb begin
+        for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
+            ub_rd_input_data_out_r[i]  = ub_rd_input_valid_out_r[i]  ? sr_rd_data[(GRP_IN + i)*16 +: 16] : 16'b0;
+            ub_rd_weight_data_out_r[i] = ub_rd_weight_valid_out_r[i] ? sr_rd_data[(GRP_W + i)*16 +: 16] : 16'b0;
+            ub_rd_bias_data_out_r[i]   = bias_win_r[i] ? sr_rd_data[(GRP_B + i)*16 +: 16] : 16'b0;
+            ub_rd_Y_data_out_r[i]      = y_win_r[i]    ? sr_rd_data[(GRP_Y + i)*16 +: 16] : 16'b0;
+            ub_rd_H_data_out_r[i]      = h_win_r[i]    ? sr_rd_data[(GRP_H + i)*16 +: 16] : 16'b0;
+            value_old_in[i]            = g_win_r[i]    ? sr_rd_data[(GRP_G + i)*16 +: 16] : 16'b0;
+        end
+    end
 
     always_ff @(posedge clk or posedge rst) begin
         if (rst) begin
-            // reset all memory to 0
-            for (int i = 0; i < UNIFIED_BUFFER_WIDTH; i++) begin
-                ub_memory[i] <= '0;
-            end
+            // SRAM array itself is cleared by CLEAR_ON_RESET (behavioral
+            // model; see the sram_macro header note).
 
             // set internal registers to 0
             for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
-                ub_rd_input_data_out_r[i] <= '0;
                 ub_rd_input_valid_out_r[i] <= '0;
-                ub_rd_weight_data_out_r[i] <= '0;
                 ub_rd_weight_valid_out_r[i] <= '0;
-                ub_rd_bias_data_out_r[i] <= '0;
                 ub_rd_scale_valid_out_r[i] <= '0;
-                ub_rd_Y_data_out_r[i] <= '0;
-                ub_rd_H_data_out_r[i] <= '0;
-                value_old_in[i] <= '0;
+                bias_win_r[i] <= '0;
+                y_win_r[i] <= '0;
+                h_win_r[i] <= '0;
+                g_win_r[i] <= '0;
             end
 
             wr_ptr <= '0;
@@ -358,25 +664,9 @@ module unified_buffer_nxn #(
                 grad_done_cnt[i] <= '0;
             end
         end else begin
-            // WRITING LOGIC
-            // matrices are stored in row major format
-            // if there are two columns, the first column will be stored at even indices and the second column will be stored at odd indices
-            // BUG-UB-2 note: host loop decrements so channel[1] is at lower address than channel[0] (intentional row-major order)
-            // BUG-UB-3: VPU output streams are also placed row-major — beat
-            // (row r, col i) of a rows x w stream lands at
-            // stream_base + r*w + i. Arrival-order placement only equaled
-            // row-major at N=2; at N>=3 the skewed wavefront scrambled the
-            // stored matrix against every row-major read walk.
-            wr_stream_base_comb = wr_stream_active_d ? wr_stream_base : wr_ptr;
-            wr_ptr_next = wr_ptr;  // BUG-UB-1 fix: use _next variable; single <= at end
-            for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin     // FOR LOOP SHOULD DECREMENT TO STORE IN ROW MAJOR ORDER!!!
-                if (ub_wr_valid_in[i]) begin
-                    ub_memory[wr_stream_base_comb + wr_beat_cnt[i]*wr_stream_w_eff + i] <= ub_wr_data_in[i];
-                end else if (ub_wr_host_valid_in[i]) begin
-                    ub_memory[wr_ptr_next] <= ub_wr_host_data_in[i];
-                    wr_ptr_next = wr_ptr_next + 1;
-                end
-            end
+            // WRITING LOGIC (pointer/bookkeeping only — the SRAM write ports
+            // are assembled combinationally above). matrices are stored in
+            // row major format.
             if (ub_wr_valid_in[0]) begin
                 // lane 0 beats every cycle from stream start until its rows
                 // run out; keep wr_ptr one row past its latest beat so the
@@ -407,113 +697,38 @@ module unified_buffer_nxn #(
                 end
             end
 
-            //WRITING LOGIC (for gradient descent modules to UB)
+            // WRITING LOGIC (gradient descent beat counters; the writeback
+            // itself is a combinational SRAM write port above)
             if (grad_bias_or_weight) begin
-                // BUG-UB-3: row-major writeback — done beat (r, i) of lane i
-                // updates ub_memory[grad_descent_ptr + r*w + i]. The legacy
-                // incrementing-pointer scheme wrote in skewed arrival order,
-                // which only equaled row-major at N=2.
                 for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
                     if (grad_descent_done_out[i]) begin
-                        ub_memory[grad_descent_ptr + grad_done_cnt[i]*wr_stream_w_eff + i] <= value_updated_out[i];
                         grad_done_cnt[i] <= grad_done_cnt[i] + 1;
-                    end
-                end
-            end else begin
-                for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
-                    if (grad_descent_done_out[i]) begin
-                        ub_memory[grad_descent_ptr + i] <= value_updated_out[i];
                     end
                 end
             end
 
-            // READING LOGIC (for input from UB to left side of systolic array)
-            if (rd_input_time_counter + 1 < rd_input_row_size + rd_input_col_size) begin
-                rd_input_ptr_next = rd_input_ptr;  // BUG-UB-1 fix
-                if(rd_input_transpose) begin
-                    // For transposed matrices (for loop should increment)
-                    for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
-                        if(rd_input_time_counter >= i && rd_input_time_counter < rd_input_row_size + i && i < rd_input_col_size) begin 
-                            ub_rd_input_valid_out_r[i] <= 1'b1;
-                            ub_rd_input_data_out_r[i] <= ub_memory[rd_input_ptr_next];
-                            rd_input_ptr_next = rd_input_ptr_next + (rd_input_row_size - 1);
-                        end else begin 
-                            ub_rd_input_valid_out_r[i] <= 1'b0;
-                            ub_rd_input_data_out_r[i] <= '0;
-                        end
-                    end
-                    rd_input_ptr_next = rd_input_ptr_next + ascending_walk_correction(rd_input_row_size, rd_input_col_size, rd_input_time_counter);
-                end else begin
-                    // For untransposed matrices (for loop should decrement)
-                    for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
-                        if(rd_input_time_counter >= i && rd_input_time_counter < rd_input_row_size + i && i < rd_input_col_size) begin 
-                            ub_rd_input_valid_out_r[i] <= 1'b1;
-                            ub_rd_input_data_out_r[i] <= ub_memory[rd_input_ptr_next];
-                            rd_input_ptr_next = rd_input_ptr_next + (rd_input_col_size - 1);
-                        end else begin 
-                            ub_rd_input_valid_out_r[i] <= 1'b0;
-                            ub_rd_input_data_out_r[i] <= '0;
-                        end
-                    end
-                    rd_input_ptr_next = rd_input_ptr_next + descending_walk_correction(rd_input_col_size, rd_input_row_size, rd_input_time_counter);
+            // READING LOGIC (input from UB to left side of systolic array):
+            // state advance + valid registers; addresses are the comb walk.
+            if (in_active) begin
+                for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
+                    ub_rd_input_valid_out_r[i] <= in_win[i];
                 end
                 rd_input_time_counter <= rd_input_time_counter + 1;
                 rd_input_ptr <= rd_input_ptr_next;
-            end else begin 
+            end else begin
                 rd_input_ptr <= 0;
                 rd_input_row_size <= 0;
                 rd_input_col_size <= 0;
                 rd_input_time_counter <= '0;
                 for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
                     ub_rd_input_valid_out_r[i] <= 1'b0;
-                    ub_rd_input_data_out_r[i] <= '0;
                 end
             end
 
-            // READING LOGIC (for weights from UB to top of systolic array)
-            if (rd_weight_time_counter + 1 < rd_weight_row_size + rd_weight_col_size) begin
-                rd_weight_ptr_next = rd_weight_ptr;  // BUG-UB-1 fix
-                rd_weight_lanes_read = 0;
-                if(rd_weight_transpose) begin
-                    // For transposed matrices (for loop should increment)
-                    for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
-                        if(rd_weight_time_counter >= i && rd_weight_time_counter < rd_weight_row_size + i && i < rd_weight_col_size) begin
-                            ub_rd_weight_valid_out_r[i] <= 1'b1;
-                            ub_rd_weight_data_out_r[i] <= ub_memory[rd_weight_ptr_next];
-                            rd_weight_ptr_next = rd_weight_ptr_next + rd_weight_skip_size;
-                            rd_weight_lanes_read = rd_weight_lanes_read + 1;
-                        end else begin
-                            ub_rd_weight_valid_out_r[i] <= 0;
-                            ub_rd_weight_data_out_r[i] <= '0;
-                        end
-                    end
-                    // Generalized end-of-cycle correction (any column count C, not just C=2):
-                    // undo all L lane skips from this cycle, step back 1 element, and once the
-                    // leading lanes start retiring (t >= C-1) hop forward one row (C+1 = skip).
-                    // C is the original command col size, i.e. skip-1; equals the legacy
-                    // -(skip+1) constant at C=2 while any reads remain.
-                    rd_weight_ptr_next = rd_weight_ptr_next - rd_weight_skip_size*rd_weight_lanes_read - 1
-                                       + ((rd_weight_time_counter >= rd_weight_skip_size - 2) ? rd_weight_skip_size : 0);
-                end else begin
-                    // For untransposed matrices (for loop should decrement)
-                    for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
-                        if(rd_weight_time_counter >= i && rd_weight_time_counter < rd_weight_row_size + i && i < rd_weight_col_size) begin
-                            ub_rd_weight_valid_out_r[i] <= 1'b1;
-                            ub_rd_weight_data_out_r[i] <= ub_memory[rd_weight_ptr_next];
-                            rd_weight_ptr_next = rd_weight_ptr_next - rd_weight_skip_size;
-                            rd_weight_lanes_read = rd_weight_lanes_read + 1;
-                        end else begin
-                            ub_rd_weight_valid_out_r[i] <= 0;
-                            ub_rd_weight_data_out_r[i] <= '0;
-                        end
-                    end
-                    // Generalized end-of-cycle correction (any column count C, not just C=2):
-                    // undo all L lane skips from this cycle, step back one row (C = skip-1),
-                    // and while the trailing lanes are still joining (t < C-1) hop forward one
-                    // row plus one element (C+1 = skip). C is the original command col size;
-                    // equals the legacy +(skip+1) constant at C=2 while any reads remain.
-                    rd_weight_ptr_next = rd_weight_ptr_next + rd_weight_skip_size*rd_weight_lanes_read - (rd_weight_skip_size - 1)
-                                       + ((rd_weight_time_counter < rd_weight_skip_size - 2) ? rd_weight_skip_size : 0);
+            // READING LOGIC (weights from UB to top of systolic array)
+            if (wt_active) begin
+                for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
+                    ub_rd_weight_valid_out_r[i] <= wt_win[i];
                 end
                 rd_weight_time_counter <= rd_weight_time_counter + 1;
                 rd_weight_ptr <= rd_weight_ptr_next;
@@ -524,34 +739,18 @@ module unified_buffer_nxn #(
                 rd_weight_time_counter <= '0;
                 for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
                     ub_rd_weight_valid_out_r[i] <= 0;
-                    ub_rd_weight_data_out_r[i] <= '0;
                 end
             end
 
-            // READING LOGIC (for bias inputs from UB to bias modules in VPU)
-            if (rd_bias_time_counter + 1 < rd_bias_row_size + rd_bias_col_size) begin
+            // READING LOGIC (bias/residual/scale from UB to VPU stages)
+            if (b_active) begin
                 for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
-                    if(rd_bias_time_counter >= i && rd_bias_time_counter < rd_bias_row_size + i && i < rd_bias_col_size) begin
-                        // ptr-2 bias: lane i's value (column i) held for
-                        // every row. ptr-7 residual / ptr-8 scale:
-                        // elementwise linear walk of the row-major matrix
-                        // at rd_bias_ptr -- lane i's r-th active beat
-                        // (r = time_counter - i) carries
-                        // ub_memory[ptr + r*col_size + i]. Same per-lane
-                        // skew and active window either way.
-                        ub_rd_bias_data_out_r[i] <= (rd_bias_residual || rd_bias_scale)
-                            ? ub_memory[rd_bias_ptr + (rd_bias_time_counter - i)*rd_bias_col_size + i]
-                            : ub_memory[rd_bias_ptr + i];
-                        // Item 18a: the scale stage's per-lane operand
-                        // window rides the same skewed schedule; it is
-                        // asserted only while a ptr-8 read armed the
-                        // scale mode (a stale-armed phase with no
-                        // operand read keeps every beat clear).
-                        ub_rd_scale_valid_out_r[i] <= rd_bias_scale;
-                    end else begin
-                        ub_rd_bias_data_out_r[i] <= '0;
-                        ub_rd_scale_valid_out_r[i] <= 1'b0;
-                    end
+                    bias_win_r[i] <= b_win[i];
+                    // Item 18a: the scale stage's per-lane operand window
+                    // rides the same skewed schedule; it is asserted only
+                    // while a ptr-8 read armed the scale mode (a stale-armed
+                    // phase with no operand read keeps every beat clear).
+                    ub_rd_scale_valid_out_r[i] <= b_win[i] && rd_bias_scale;
                 end
                 rd_bias_time_counter <= rd_bias_time_counter + 1;
             end else begin
@@ -560,23 +759,16 @@ module unified_buffer_nxn #(
                 rd_bias_col_size <= 0;
                 rd_bias_time_counter <= '0;
                 for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
-                    ub_rd_bias_data_out_r[i] <= '0;
+                    bias_win_r[i] <= '0;
                     ub_rd_scale_valid_out_r[i] <= 1'b0;
                 end
             end
 
-            // READING LOGIC (for Y inputs from UB to loss modules in VPU)
-            if (rd_Y_time_counter + 1 < rd_Y_row_size + rd_Y_col_size) begin
-                rd_Y_ptr_next = rd_Y_ptr;  // BUG-UB-1 fix
-                for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
-                    if(rd_Y_time_counter >= i && rd_Y_time_counter < rd_Y_row_size + i && i < rd_Y_col_size) begin
-                        ub_rd_Y_data_out_r[i] <= ub_memory[rd_Y_ptr_next];
-                        rd_Y_ptr_next = rd_Y_ptr_next + (rd_Y_col_size - 1);
-                    end else begin
-                        ub_rd_Y_data_out_r[i] <= '0;
-                    end
+            // READING LOGIC (Y inputs from UB to loss modules in VPU)
+            if (y_active) begin
+                for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
+                    y_win_r[i] <= y_win[i];
                 end
-                rd_Y_ptr_next = rd_Y_ptr_next + descending_walk_correction(rd_Y_col_size, rd_Y_row_size, rd_Y_time_counter);
                 rd_Y_time_counter <= rd_Y_time_counter + 1;
                 rd_Y_ptr <= rd_Y_ptr_next;
             end else begin
@@ -585,22 +777,15 @@ module unified_buffer_nxn #(
                 rd_Y_col_size <= 0;
                 rd_Y_time_counter <= '0;
                 for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
-                    ub_rd_Y_data_out_r[i] <= '0;
+                    y_win_r[i] <= '0;
                 end
             end
 
-            // READING LOGIC (for H inputs from UB to activation derivative modules in VPU)
-            if (rd_H_time_counter + 1 < rd_H_row_size + rd_H_col_size) begin
-                rd_H_ptr_next = rd_H_ptr;  // BUG-UB-1 fix
-                for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
-                    if(rd_H_time_counter >= i && rd_H_time_counter < rd_H_row_size + i && i < rd_H_col_size) begin
-                        ub_rd_H_data_out_r[i] <= ub_memory[rd_H_ptr_next];
-                        rd_H_ptr_next = rd_H_ptr_next + (rd_H_col_size - 1);
-                    end else begin
-                        ub_rd_H_data_out_r[i] <= '0;
-                    end
+            // READING LOGIC (H inputs from UB to activation derivative modules in VPU)
+            if (h_active) begin
+                for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
+                    h_win_r[i] <= h_win[i];
                 end
-                rd_H_ptr_next = rd_H_ptr_next + descending_walk_correction(rd_H_col_size, rd_H_row_size, rd_H_time_counter);
                 rd_H_time_counter <= rd_H_time_counter + 1;
                 rd_H_ptr <= rd_H_ptr_next;
             end else begin
@@ -609,31 +794,22 @@ module unified_buffer_nxn #(
                 rd_H_col_size <= 0;
                 rd_H_time_counter <= '0;
                 for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
-                    ub_rd_H_data_out_r[i] <= '0;
+                    h_win_r[i] <= '0;
                 end
             end
 
-            // READING LOGIC (for bias and weight gradient descent inputs from UB to gradient descent modules)
-            if (rd_grad_bias_time_counter + 1 < rd_grad_bias_row_size + rd_grad_bias_col_size) begin
+            // READING LOGIC (bias and weight gradient descent inputs from UB
+            // to gradient descent modules): window registers only; data comes
+            // back on the shared SRAM read group.
+            if (gb_active) begin
                 for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
-                    if(rd_grad_bias_time_counter >= i && rd_grad_bias_time_counter < rd_grad_bias_row_size + i && i < rd_grad_bias_col_size) begin
-                        value_old_in[i] <= ub_memory[rd_grad_bias_ptr + i];
-                    end else begin
-                        value_old_in[i] <= '0;
-                    end
+                    g_win_r[i] <= g_win[i];
                 end
                 rd_grad_bias_time_counter <= rd_grad_bias_time_counter + 1;
-            end else if (rd_grad_weight_time_counter + 1 < rd_grad_weight_row_size + rd_grad_weight_col_size) begin
-                rd_grad_weight_ptr_next = rd_grad_weight_ptr;  // BUG-UB-1 fix
-                for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
-                    if(rd_grad_weight_time_counter >= i && rd_grad_weight_time_counter < rd_grad_weight_row_size + i && i < rd_grad_weight_col_size) begin 
-                        value_old_in[i] <= ub_memory[rd_grad_weight_ptr_next];
-                        rd_grad_weight_ptr_next = rd_grad_weight_ptr_next + (rd_grad_weight_col_size - 1);
-                    end else begin 
-                        value_old_in[i] <= '0;
-                    end
+            end else if (gw_cond) begin
+                for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
+                    g_win_r[i] <= g_win[i];
                 end
-                rd_grad_weight_ptr_next = rd_grad_weight_ptr_next + descending_walk_correction(rd_grad_weight_col_size, rd_grad_weight_row_size, rd_grad_weight_time_counter);
                 rd_grad_weight_time_counter <= rd_grad_weight_time_counter + 1;
                 rd_grad_weight_ptr <= rd_grad_weight_ptr_next;
             end else begin
@@ -646,7 +822,7 @@ module unified_buffer_nxn #(
                 rd_grad_weight_col_size <= 0;
                 rd_grad_weight_time_counter <= '0;
                 for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
-                    value_old_in[i] <= '0;
+                    g_win_r[i] <= '0;
                 end
             end
 

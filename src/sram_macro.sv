@@ -12,17 +12,25 @@
 // Write priority: port 0 > port 1 > ... > port N-1
 // (if multiple writes to same address in same cycle, lower-index wins)
 //
-// For the unified buffer: use NUM_WRITE=3 (VPU, host, grad_descent),
-// NUM_READ=7 (input, weight, bias, Y, H, grad_bias, grad_weight).
+// For the unified buffer: one instance with NUM_WRITE=2N (N gradient
+// writeback + N merged VPU-stream/host), NUM_READ=6N (input, weight,
+// bias/residual/scale, Y, H, grad bias/weight lane groups).
 // For the program buffer: use NUM_WRITE=1 (host load), NUM_READ=1 (instruction fetch).
+//
+// CLEAR_ON_RESET (behavioral model ONLY): when 1, mem is zeroed while rst
+// is asserted, matching the DFF arrays this model replaces (the unified
+// buffer's gate suites rely on reset-zeroed storage). Real foundry macros
+// have no array reset — a silicon swap needs a boot-time scrub pass instead.
 
 module sram_macro #(
     parameter int WIDTH = 16,
     parameter int DEPTH = 1024,
     parameter int NUM_WRITE = 3,
-    parameter int NUM_READ = 7
+    parameter int NUM_READ = 7,
+    parameter int CLEAR_ON_RESET = 0
 )(
     input logic clk,
+    input logic rst,
 
     // Write ports (synchronous, priority: 0 > 1 > ... > N-1)
     // Packed arrays for iverilog compatibility
@@ -40,17 +48,24 @@ module sram_macro #(
 
     // Write logic with priority arbitration
     always_ff @(posedge clk) begin
-        // Priority: port 0 wins over port 1, etc.
-        // Loop from high to low so lower-index overwrites higher-index
-        for (int i = NUM_WRITE-1; i >= 0; i--) begin
-            if (wr_en[i]) begin
-                mem[wr_addr[i*16 +: 16]] <= wr_data[i*WIDTH +: WIDTH];
+        if (CLEAR_ON_RESET != 0 && rst) begin
+            // Behavioral-only array clear (see header note).
+            for (int i = 0; i < DEPTH; i++) begin
+                mem[i] <= '0;
             end
-        end
+        end else begin
+            // Priority: port 0 wins over port 1, etc.
+            // Loop from high to low so lower-index overwrites higher-index
+            for (int i = NUM_WRITE-1; i >= 0; i--) begin
+                if (wr_en[i]) begin
+                    mem[wr_addr[i*16 +: 16]] <= wr_data[i*WIDTH +: WIDTH];
+                end
+            end
 
-        // Read logic (synchronous, 1-cycle latency)
-        for (int i = 0; i < NUM_READ; i++) begin
-            rd_data[i*WIDTH +: WIDTH] <= mem[rd_addr[i*16 +: 16]];
+            // Read logic (synchronous, 1-cycle latency)
+            for (int i = 0; i < NUM_READ; i++) begin
+                rd_data[i*WIDTH +: WIDTH] <= mem[rd_addr[i*16 +: 16]];
+            end
         end
     end
 

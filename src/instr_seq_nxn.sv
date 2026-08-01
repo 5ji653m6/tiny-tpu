@@ -167,6 +167,7 @@ module instr_seq_nxn #(
         .NUM_READ(1)
     ) prog_sram (
         .clk(clk),
+        .rst(rst),  // CLEAR_ON_RESET=0: rst unused, reads only touch written words
         .wr_en(sr_wr_en),
         .wr_addr(sr_wr_addr),
         .wr_data(sr_wr_data),

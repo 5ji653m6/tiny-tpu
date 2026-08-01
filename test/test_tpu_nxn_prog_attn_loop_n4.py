@@ -162,7 +162,7 @@ async def test_tpu_nxn_prog_attn_loop_n4(dut):
         for r in range(4):
             for c in range(4):
                 a = base + 4 * r + c
-                got = nxn.ub_inst.ub_memory[a].value.integer & 0xFFFF
+                got = nxn.ub_inst.ub_sram.mem[a].value.integer & 0xFFFF
                 want = P_RAW[r][c] & 0xFFFF
                 assert got == want, (
                     f"P rep {rep + 1}: mem[{a}] = "
@@ -175,7 +175,7 @@ async def test_tpu_nxn_prog_attn_loop_n4(dut):
         for c in range(4):
             for base, img, name in [(0, qr, "Q"), (16, kr, "K")]:
                 a = base + 4 * r + c
-                got = nxn.ub_inst.ub_memory[a].value.integer & 0xFFFF
+                got = nxn.ub_inst.ub_sram.mem[a].value.integer & 0xFFFF
                 assert got == img[r][c], (
                     f"{name} region: mem[{a}] corrupted: "
                     f"{from_fixed(got):+.4f}, expected "

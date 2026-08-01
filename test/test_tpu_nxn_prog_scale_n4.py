@@ -255,7 +255,7 @@ async def test_tpu_nxn_prog_scale_n4(dut):
 
     # ---- UB image words 0..127 exact (host + C1/C2/C3) ----
     for a in range(128):
-        got = nxn.ub_inst.ub_memory[a].value.integer & 0xFFFF
+        got = nxn.ub_inst.ub_sram.mem[a].value.integer & 0xFFFF
         want = GOLD[a] & 0xFFFF
         assert got == want, (
             f"mem[{a}] = {from_fixed(got):+.4f}, expected "

@@ -267,7 +267,7 @@ async def test_tpu_nxn_train_n4(dut):
                               (36, 16, "Y"), (52, 16, "dZ"),
                               (68, 16, "G")]:
         for a in range(base, base + count):
-            got = nxn.ub_inst.ub_memory[a].value.integer & 0xFFFF
+            got = nxn.ub_inst.ub_sram.mem[a].value.integer & 0xFFFF
             want = to_fixed(GOLD[a])
             assert got == want, (
                 f"{name} region: mem[{a}] = {from_fixed(got):+.4f}, "

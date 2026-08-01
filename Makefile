@@ -765,3 +765,16 @@ test_tpu_nxn_prog_adaln_n16: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=16 MODULE=test_tpu_nxn_prog_adaln_n16 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_adaln_n16.vcd 2>/dev/null || true
+
+# ===================== Item 22: K-tiling via radd (N=16) ============
+# A 16x32 x 32x16 matmul (K=32 > N) as two 16x16 K-tiles in ONE loaded
+# program: tile 0 bypass phase writes C_0 = A_0 @ B_0 to addr_C, tile 1
+# radd phase reads C_0 back through the item-17a ptr-7 residual pathway
+# and writes C = C_0 + A_1 @ B_1 to the same address. No RTL changes —
+# the radd pathway doubles as a general tile-accumulation primitive.
+# 384-word program, 1280-word image (UB_WIDTH=2048, PROG_DEPTH=512).
+test_tpu_nxn_prog_ktil_n16: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=16 -Pdump.PROG_DEPTH=512 -Pdump.UB_WIDTH=2048 $(SOURCES) test/dump_tpu_nxn_prog.sv
+	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=16 MODULE=test_tpu_nxn_prog_ktil_n16 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_ktil_n16.vcd 2>/dev/null || true

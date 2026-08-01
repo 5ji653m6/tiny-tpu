@@ -750,3 +750,17 @@ test_tpu_nxn_prog_n16: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=16 MODULE=test_tpu_nxn_prog_n16 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_n16.vcd 2>/dev/null || true
+
+# ===================== Array scaling: N=16 adaLN capstone (21c) ======
+# The complete DiT denoiser block at N=16 (d_model=16, 2 heads x
+# d_head=8, T=3 timesteps with per-timestep adaLN conditioning) run
+# as ONE loaded program. 4226-word program (913 host prefix + LOOPI +
+# 3312-word body), 29952-word UB image exact (UB_WIDTH=32768,
+# PROG_DEPTH=8192). N-scaled timing: weight wait 2N+1=33, plain
+# emission 7N=112, mid-phase operand read at switch+(N-2)=tick(14),
+# mod drain 13N/2=104.
+test_tpu_nxn_prog_adaln_n16: $(SIM_BUILD_DIR)
+	$(IVERILOG) -o $(SIM_VVP) -s dump -g2012 -Pdump.N=16 -Pdump.PROG_DEPTH=8192 -Pdump.UB_WIDTH=32768 $(SOURCES) test/dump_tpu_nxn_prog.sv
+	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=16 MODULE=test_tpu_nxn_prog_adaln_n16 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
+	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
+	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_adaln_n16.vcd 2>/dev/null || true

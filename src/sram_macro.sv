@@ -39,8 +39,18 @@ module sram_macro #(
     input logic [NUM_WRITE*WIDTH-1:0] wr_data,
 
     // Read ports (synchronous, 1-cycle latency)
+    // (* keep *) on rd_data: hardening anchor. The loaded-program chip
+    // top (tpu_nxn_prog) exposes no result outputs — results land in UB
+    // internal state — so the synthesis sweep would otherwise delete the
+    // entire "unobservable" datapath (array/VPU/UB) and harden only the
+    // sequencer skeleton. keep on the read-data register roots the whole
+    // cycle: $memrd → $mem → $memwr stay, the write-port drivers (VPU,
+    // host, gradient writeback) stay, read consumers (array) stay, and
+    // the control chain back to the sequencer/program buffer stays.
+    // Ignored by sim. (keep on the mem array itself does NOT anchor —
+    // opt_clean removes the $mem regardless; verified with yosys 0.62.)
     input logic [NUM_READ*16-1:0] rd_addr,
-    output logic [NUM_READ*WIDTH-1:0] rd_data
+    (* keep *) output logic [NUM_READ*WIDTH-1:0] rd_data
 );
 
     // SRAM array (synthesizes to foundry macro)

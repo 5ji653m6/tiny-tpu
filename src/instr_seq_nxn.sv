@@ -160,6 +160,25 @@ module instr_seq_nxn #(
     logic [15:0] sr_rd_addr;
     logic [PW-1:0] sr_rd_data;
 
+`ifdef SYNTH_SRAM_MACROS
+    // Item 24 (hardening flow only, VERILOG_DEFINES): sky130 1rw1r hard
+    // macros — 12x 32x256 banks assemble the 373-bit word. Same
+    // instance name/ports, same synchronous-read timing, so the
+    // fetch/execute pipeline is unchanged. Simulation keeps the
+    // behavioral model below (gate unaffected).
+    sram_macro_1rw1r_sky130 #(
+        .WIDTH(PW),
+        .DEPTH(PROG_DEPTH)
+    ) prog_sram (
+        .clk(clk),
+        .rst(rst),
+        .wr_en(sr_wr_en),
+        .wr_addr(sr_wr_addr),
+        .wr_data(sr_wr_data),
+        .rd_addr(sr_rd_addr),
+        .rd_data(sr_rd_data)
+    );
+`else
     sram_macro #(
         .WIDTH(PW),
         .DEPTH(PROG_DEPTH),
@@ -174,6 +193,7 @@ module instr_seq_nxn #(
         .rd_addr(sr_rd_addr),
         .rd_data(sr_rd_data)
     );
+`endif
 
     logic [PTR_W-1:0] wr_ptr;
 

@@ -72,7 +72,15 @@ module ub_banked #(
     input  logic [2*N*16-1:0] wr_addr,
     input  logic [2*N*WIDTH-1:0] wr_data,
     input  logic [6*N*16-1:0] rd_addr,
-    output logic [6*N*WIDTH-1:0] rd_data,
+    // (* keep *) on rd_data: hardening anchor — same role as the keep on
+    // sram_macro's rd_data (the item-24 lesson). tpu_nxn_prog exposes no
+    // result outputs, so without the keep the synthesis sweep deletes the
+    // entire "unobservable" datapath and hardens a sequencer skeleton.
+    // With SYNTH_UB_BANKED the behavioral sram_macro (and its keep) is
+    // replaced by this module, so the anchor must move here. Ignored by
+    // sim. (First N=8 hardening run without it: 50 KB skeleton netlist,
+    // 6 of 8 prog macros + all 8 UB macros swept.)
+    (* keep *) output logic [6*N*WIDTH-1:0] rd_data,
     // Sim-only per-port read-window mask (contract assertions; pruned in
     // synthesis). Bit p = read port p presents a real request this cycle.
     input  logic [6*N-1:0] rd_act

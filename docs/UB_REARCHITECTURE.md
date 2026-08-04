@@ -175,6 +175,114 @@ D3. **sky130 macro geometry at DEPTH/N.** 32768/16 = 2048 words x 16b =
     4KB/bank; the existing 1kbyte macro x 4 stacked, or a 4KB ciel macro if
     available. Bank pinout feeds the floorplan sketch.
 
+## 5. Diagnostic results
+
+### D1/D2 first pass — adaln_n16 capstone (N=16, 6285 active cycles)
+
+Instrumentation: `UB_TRACE` ifdef in `unified_buffer_nxn.sv` dumps per-cycle
+read windows + all read/write addresses; `diag/ub_concurrency.py` reduces.
+
+- **Max concurrent read groups: 2** (IN+B, 360 cycles). Never 3+. Y/H/G
+  (training-only channels) are idle in the inference capstone.
+- **IN and W NEVER overlap** — the weight-stationary dataflow separates the
+  weight-load phase from the activation stream. W alone 1998 cycles, IN
+  1998, B 744.
+- **Write channels never concurrent** (STRM only; GRAD idle in inference).
+- **Plain mod-N banking: ZERO within-group conflicts, ZERO rr, ZERO ww**;
+  rw (read+write same bank) 4704 cycles; **max bank pressure = 2** accesses
+  (1R+1W) — EXACTLY a 1rw1r macro per bank, no replication (K=1).
+- **Zero same-address R+W cycles** in this program (read-during-write
+  semantics not exercised — must be re-checked on training traces where
+  grad writeback updates W'/B' in place in the G-read region).
+- XOR-fold swizzles only make things worse (within-group conflicts appear:
+  stride-1 writes alias under folding); plain mod-N is the right bank map at
+  N=16.
+
+**Verdict so far**: N banks x 1rw1r, bank = addr mod N, K=1. Remaining
+risks: partial-width strides (C=3 at N=4 -> stride 2, gcd 2) in the ncol
+tests, and same-address R/W in the training/ktil tests (behavioral model
+returns OLD data; the sky130 macro is X — if any program needs it, the
+banked UB needs a same-address bypass latch or a documented old-data
+guarantee).
+
+### D1/D2 full gate sweep — VERIFIED (2026-08-04)
+
+All 19 program-level gate targets traced (`make <t> IVERILOG='iverilog
+-DUB_TRACE'` in the tinytpu-sim container, stale results.xml deleted per
+run). Inference scope = every loaded-program test; training scope = the
+four train targets (UB-direct tests like ncol are UB-unit-level and listed
+separately).
+
+| Scope | Tests | within-group | rr | ww | same-addr R+W | max bank pressure |
+|---|---|---|---|---|---|---|
+| Inference (N=4 attn/mh_attn/loopi/tiled/radd/dit/scale/adaln/prog, N=8 prog/adaln, N=16 prog/ktil/adaln) | 15 | 0 | 0 | 0 | 0 | **2 (1R+1W)** |
+| Training (train_n4, ic_train_n4, ic_train2_n4, prog_train2_n4) | 4 | 0 | 8-16 | 8-16 | 5-10 | 3 |
+| UB-unit (ncol_n4, ncol_streams_n4) | 2 | 4 (stride-2 at C=3) | 0 | 0 | 0 | 3 |
+
+**THE CONTRACT (inference)**: under plain mod-N banking, every gated
+inference program needs at most 1 read + 1 write per bank per cycle — one
+sky130 1rw1r macro per bank, K=1, no replication, no swizzle. Bank select =
+addr[log2N-1:0] (a wire slice, zero logic).
+
+**Training is out of scope for the banked UB**: the four training tests
+violate the contract (grad writeback + stream writes collide ww; G-reads
+collide rr with operand reads; in-place W'/B' updates need read-old on
+same-address R+W — the behavioral macro returns OLD data, a silicon macro
+returns X). Training keeps the behavioral 2NW/6NR sram_macro model even on
+the hardening path; the chip's goal is inference. (If training hardening is
+ever wanted: K=2 replicas + a genuine 2W scheme + read-old bypass — noted,
+not planned.)
+
+**Partial-width strides**: gcd(stride, N) > 1 walks (C=3 at N=4) collide
+within a group under mod-N. No gated inference program does this, but the
+space of loadable programs is open. Fallback on record: prime bank count
+P = next_prime(N+2) (N=8 -> 11, N=16 -> 19) — all design strides are
+<= N+1 < P and none is a multiple of P, so mod-P banking is conflict-free
+for EVERY (R, C, transpose) by construction (P prime, lane deltas < P).
+Cost: a mod-P divider on the address path and ⌈DEPTH/P⌉-deep banks.
+v1 ships mod-N; sim-time assertions (below) catch any future program that
+leaves the contract.
+
+**Sim-time contract assertions** (non-synthesis only, `$error`): two stream
+writes or grad+stream write to one bank in one cycle (ww); two read ports
+to one bank (rr); read and write of the same address in one cycle
+(read-old semantics unavailable in silicon).
+
+## 6. v1 architecture (decision)
+
+`src/ub_banked.sv` — drop-in storage replacement inside `unified_buffer_nxn`
+under the SYNTH_SRAM_MACROS ifdef family (behavioral 2NW/6NR sram_macro
+stays the default sim golden):
+
+- N banks; bank = addr[log2N-1:0], offset = addr >> log2N.
+- Per bank: one 1rw1r macro (behavioral bank model in sim; sky130 wrapper
+  in the hardening flow — 2048 words x 16b at N=16 = 4KB = 2x 2kbyte
+  ciel macros; 32 UB macros total at N=16 + 12 prog_mem from item 24).
+- Read crossbar: per bank, the requesting port's address is OR-selected
+  (one-hot by contract); per port, data = N:1 mux of bank outputs by the
+  port's bank-select bits. 6N x N:1 x 16b data muxes + N x 6N-way address
+  OR-selects — ~30x less mux logic than the 512:1-per-port forest, and
+  every select net is private to its small mux (fanout ~N, nothing for ABC
+  to merge across lanes).
+- Writes: per bank, grad channel wins over stream (matches the behavioral
+  port-priority for the same-address case); ww/rr/same-address violations
+  hit the sim-time assertions.
+- Read-during-write different address in the same bank: native 1rw1r
+  behavior (the inference worst case, 4704 cycles in adaln_n16).
+- CLEAR_ON_RESET: sim keeps a behavioral clear in the bank model under
+  `ifndef SYNTHESIS`; silicon needs a boot scrub (sequencer or host walks
+  all banks post-reset) — called out for the hardening flow, no RTL cost.
+- Timing: 1-cycle synchronous read identical to the behavioral macro;
+  the walk/address generation in unified_buffer_nxn is UNCHANGED — only
+  the storage block behind sr_rd_addr/sr_rd_data/sr_wr_* is swapped.
+  Bit-exact by construction against the behavioral model.
+
+Verification plan (section 5 deliverables): equivalence unit test driving
+both storage blocks with identical stimulus (directed walks + randomized
+(R,C,transpose,base)), then the full 67-target gate on the SYNTH path
+(training targets excluded — documented scope), then N=8 hardening
+(must pass repair_design and route), then N=16.
+
 ## 5. Execution plan (after D1-D3)
 
 1. `src/ub_banked.sv` + `src/sram_bank_1rw1r.sv` wrapper, under

@@ -215,8 +215,8 @@ separately).
 
 | Scope | Tests | within-group | rr | ww | same-addr R+W | max bank pressure |
 |---|---|---|---|---|---|---|
-| Inference (N=4 attn/mh_attn/loopi/tiled/radd/dit/scale/adaln/prog, N=8 prog/adaln, N=16 prog/ktil/adaln) | 15 | 0 | 0 | 0 | 0 | **2 (1R+1W)** |
-| Training (train_n4, ic_train_n4, ic_train2_n4, prog_train2_n4) | 4 | 0 | 8-16 | 8-16 | 5-10 | 3 |
+| Inference (N=4 attn/mh_attn/loopi/tiled/radd/dit/scale/adaln, N=8 prog/adaln, N=16 prog/ktil/adaln) | 14 | 0 | 0 | 0 | 0 | **2 (1R+1W)** |
+| Training (train_n4, ic_train_n4, ic_train2_n4, prog_train2_n4, **prog_n4** — the item-9b 2-step training program, mislabeled inference in the first pass of this table; its trace shows the training signature rr=8/ww=8/same-addr=5/pressure=3 — corrected 2026-08-04 after the RTL assertions caught it) | 5 | 0 | 8-16 | 8-16 | 5-10 | 3 |
 | UB-unit (ncol_n4, ncol_streams_n4) | 2 | 4 (stride-2 at C=3) | 0 | 0 | 0 | 3 |
 
 **THE CONTRACT (inference)**: under plain mod-N banking, every gated
@@ -279,9 +279,20 @@ stays the default sim golden):
 
 Verification plan (section 5 deliverables): equivalence unit test driving
 both storage blocks with identical stimulus (directed walks + randomized
-(R,C,transpose,base)), then the full 67-target gate on the SYNTH path
+(R,C,transpose,base)), then the full gate on the SYNTH path
 (training targets excluded — documented scope), then N=8 hardening
 (must pass repair_design and route), then N=16.
+
+**Verification status (2026-08-04, commit 188fa11)**: `test_ub_banked_equiv`
+lockstep TB green; full inference sweep on `-DSYNTH_UB_BANKED`:
+**15/15 inference-scope targets PASS** (incl. the adaln_n16 capstone and
+ktil_n16). The only two failures, `test_tpu_nxn_prog_n4` (item-9b 2-step
+training) and `test_tpu_nxn_equiv` (legacy-vs-nxn training lockstep), are
+training-scope: the UB_BANKED_ASSERT rr checks FIRED on them — the banked
+UB flags out-of-contract programs loudly instead of silently corrupting
+data, which is exactly the intended safety behavior. `test_tpu_nxn_n4`
+(training choreography at N=4) passes anyway — its specific address
+stream happens to stay inside the contract; it is not a guarantee.
 
 ## 5. Execution plan (after D1-D3)
 

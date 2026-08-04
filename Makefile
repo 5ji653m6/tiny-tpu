@@ -69,7 +69,8 @@ SOURCES = src/pe.sv \
 		  src/instr_seq_nxn.sv \
 		  src/scale_child.sv \
 		  src/scale_parent.sv \
-		  src/tpu_nxn_prog.sv
+		  src/tpu_nxn_prog.sv \
+		  src/ub_banked.sv
 
 # MODIFY 1) variable next to -s 
 # MODIFY 2) variable next to $(SOURCES)
@@ -778,3 +779,16 @@ test_tpu_nxn_prog_ktil_n16: $(SIM_BUILD_DIR)
 	PYTHONOPTIMIZE=$(NOASSERT) TPU_NXN_PROG_N=16 MODULE=test_tpu_nxn_prog_ktil_n16 $(VVP) -M $(COCOTB_LIBS) -m $(COCOTB_VPI_MODULE) $(SIM_VVP)
 	python -c "f=open('results.xml').read();exit(1 if 'failure' in f else 0)"
 	mv tpu_nxn_prog.vcd waveforms/tpu_nxn_prog_ktil_n16.vcd 2>/dev/null || true
+
+# ===================== Item 25: banked UB equivalence ================
+# Lockstep equivalence of the item-25 banked UB storage (src/ub_banked.sv)
+# against the behavioral 2NW/6NR sram_macro golden. Pure-SV self-checking
+# TB (no cocotb): directed affine-walk phases + 2000 cycles of
+# constrained-random contract-respecting traffic at N=4, rd_data compared
+# bit-exactly every cycle. Any mismatch or UB_BANKED_ASSERT contract
+# violation fails the grep gate.
+test_ub_banked_equiv: $(SIM_BUILD_DIR)
+	iverilog -o $(SIM_BUILD_DIR)/ub_banked_equiv.vvp -s test_ub_banked_equiv -g2012 src/sram_macro.sv src/ub_banked.sv test/test_ub_banked_equiv.sv
+	vvp $(SIM_BUILD_DIR)/ub_banked_equiv.vvp > $(SIM_BUILD_DIR)/ub_banked_equiv.log 2>&1 || true
+	grep -q "ALL TESTS PASSED" $(SIM_BUILD_DIR)/ub_banked_equiv.log
+	! grep -qE "ERROR|UB_BANKED_ASSERT" $(SIM_BUILD_DIR)/ub_banked_equiv.log

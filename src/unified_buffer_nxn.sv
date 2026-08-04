@@ -121,6 +121,29 @@ module unified_buffer_nxn #(
     logic [6*SYSTOLIC_ARRAY_WIDTH*16-1:0] sr_rd_addr;
     logic [6*SYSTOLIC_ARRAY_WIDTH*16-1:0] sr_rd_data;
 
+    // Packed per-lane read-window mask (bit G*N+i = lane i of group G):
+    // drives the banked UB's rd_act port (contract assertions) and the
+    // UB_TRACE diagnostic. Wires only; pruned where unused.
+    logic [6*SYSTOLIC_ARRAY_WIDTH-1:0] ub_win_packed;
+
+`ifdef SYNTH_UB_BANKED
+    // Item 25: banked 1rw1r storage — routable by construction
+    // (docs/UB_REARCHITECTURE.md). Same ports/timing as sram_macro.
+    ub_banked #(
+        .WIDTH(16),
+        .DEPTH(UNIFIED_BUFFER_WIDTH),
+        .N(SYSTOLIC_ARRAY_WIDTH)
+    ) ub_sram (
+        .clk(clk),
+        .rst(rst),
+        .wr_en(sr_wr_en),
+        .wr_addr(sr_wr_addr),
+        .wr_data(sr_wr_data),
+        .rd_addr(sr_rd_addr),
+        .rd_data(sr_rd_data),
+        .rd_act(ub_win_packed)
+    );
+`else
     sram_macro #(
         .WIDTH(16),
         .DEPTH(UNIFIED_BUFFER_WIDTH),
@@ -136,6 +159,7 @@ module unified_buffer_nxn #(
         .rd_addr(sr_rd_addr),
         .rd_data(sr_rd_data)
     );
+`endif
 
     // Test observability: the full-chip gate suites read the buffer contents
     // hierarchically via VPI as `ub_inst.ub_sram.mem[a]` (pull-based reads,
@@ -597,29 +621,30 @@ module unified_buffer_nxn #(
         end
     end
 
+    // Packed window mask assembly (drives ub_banked.rd_act + UB_TRACE).
+    always_comb begin
+        for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
+            ub_win_packed[0*SYSTOLIC_ARRAY_WIDTH + i] = in_win[i];
+            ub_win_packed[1*SYSTOLIC_ARRAY_WIDTH + i] = wt_win[i];
+            ub_win_packed[2*SYSTOLIC_ARRAY_WIDTH + i] = b_win[i];
+            ub_win_packed[3*SYSTOLIC_ARRAY_WIDTH + i] = y_win[i];
+            ub_win_packed[4*SYSTOLIC_ARRAY_WIDTH + i] = h_win[i];
+            ub_win_packed[5*SYSTOLIC_ARRAY_WIDTH + i] = g_win[i];
+        end
+    end
+
 `ifdef UB_TRACE
     // Item 25 diagnostic D1: per-cycle dump of the full port-utilization
     // state — per-lane read windows, all read addresses, write enables and
     // write addresses. Offline analysis (diag/ub_concurrency.py) derives
     // group-concurrency maxima and bank-conflict counts for candidate
     // swizzles. Compile-time only; the gate suites never define UB_TRACE.
-    logic [6*SYSTOLIC_ARRAY_WIDTH-1:0] ub_trace_win;
-    always_comb begin
-        for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
-            ub_trace_win[0*SYSTOLIC_ARRAY_WIDTH + i] = in_win[i];
-            ub_trace_win[1*SYSTOLIC_ARRAY_WIDTH + i] = wt_win[i];
-            ub_trace_win[2*SYSTOLIC_ARRAY_WIDTH + i] = b_win[i];
-            ub_trace_win[3*SYSTOLIC_ARRAY_WIDTH + i] = y_win[i];
-            ub_trace_win[4*SYSTOLIC_ARRAY_WIDTH + i] = h_win[i];
-            ub_trace_win[5*SYSTOLIC_ARRAY_WIDTH + i] = g_win[i];
-        end
-    end
     integer ub_trace_fd;
     initial ub_trace_fd = $fopen("ub_trace.log", "w");
     always @(posedge clk) begin
-        if (!rst && (|ub_trace_win || |sr_wr_en)) begin
+        if (!rst && (|ub_win_packed || |sr_wr_en)) begin
             $fdisplay(ub_trace_fd, "%h %h %h %h",
-                      ub_trace_win, sr_rd_addr, sr_wr_en, sr_wr_addr);
+                      ub_win_packed, sr_rd_addr, sr_wr_en, sr_wr_addr);
         end
     end
 `endif

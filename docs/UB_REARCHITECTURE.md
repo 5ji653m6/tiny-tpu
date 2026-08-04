@@ -1,0 +1,187 @@
+# UB Re-architecture for Routable Hardening (Item 25)
+
+Status: DESIGN (2026-08-04). Predecessor: `docs/SRAM_INTEGRATION.md` (behavioral
+2NW/6NR macro swap — timing bit-exact in sim, but unroutable in synthesis at
+true N).
+
+## 1. Why this document exists
+
+The behavioral DFF-UB makes true-N hardening impossible. Three stacked
+pathologies, all rooted in the UB's port structure (full evidence in the
+tinytpu-loop README item-24 entry):
+
+1. `repair_design` (the ONLY fanout repair in LibreLane 3.0.5 — there is no
+   synthesis-level fanout control) freezes on one net at ~85-93% of nets,
+   deterministic (N=8 twins froze at the same iteration).
+2. `repair_timing` never converges on the unrepaired netlist (N=8: 350+
+   passes, WNS asymptote ~-787 ns at 0.007 ns/iter; N=16: zero-output freeze).
+3. Global routing saturates (GRT-0228/0229, usage=65535 on single gcell
+   edges) from unrepaired 1,026-4,097-terminal fanout nets (~350/run).
+
+Fanout census on the N=8 post-ABC netlist (`diag/fanout_census.py`):
+
+- `clk` 34,156 sinks (CTS's job — fine).
+- `rst` 10,139 sinks (CLEAR_ON_RESET rides rst to every UB DFF).
+- ~30 ABC-created nets at exactly 4096/4097/4098 sinks + one at 7,507.
+  **4096 = 8 lanes x 512 words**: ABC discovered the per-lane read-mux select
+  patterns are correlated and merged them into single nets driving all 8
+  lanes' mux trees. These nets do not exist pre-ABC, so RTL-level per-lane
+  buffering cannot fix them; the read path itself must change.
+
+Conclusion: end-to-end true-N hardening is gated on replacing the 6N-read /
+2N-write behavioral UB with a port-reduced, banked architecture that is
+routable by construction while remaining cycle/bit-exact against the
+behavioral model (the golden for the entire gate suite).
+
+## 2. Complete walk-mode characterization
+
+All address math from `src/unified_buffer_nxn.sv` (the combinational port
+assembly, lines ~395-581). Within one cycle, one read group presents up to N
+addresses (one per active lane). Active-lane condition for all groups:
+`t >= i && t < R + i && i < C` (lane i starts at cycle i — the systolic
+skew — and streams R beats). Notation: R/C = latched row/col sizes, base =
+latched pointer, t = channel time counter, i = lane.
+
+| Group | Mode | Lane-i address at cycle t | Stride across lanes (i) | Stride across cycles (t) | Touches each element |
+|---|---|---|---|---|---|
+| GRP_IN (ptr 0) | untransposed | base + (t-i)*C + i | -(C-1) | +C | once |
+| GRP_IN (ptr 0) | transposed | base + i*(R'-1) + (t-i)... affine | +(R'-1) | +1 | once |
+| GRP_W (ptr 1) | untransposed | base + t*... - i*skip, skip=C+1 | -(C+1) | re-read | R times (weights reused per output row) |
+| GRP_W (ptr 1) | transposed | ... + i*skip | +(C+1) | re-read | R times |
+| GRP_B (ptr 2) bias | broadcast | ptr + i (CONSTANT) | 1 | 0 | held whole walk |
+| GRP_B (ptr 7/8) residual/scale | elementwise | ptr + (t-i)*C + i | -(C-1) | +C | once |
+| GRP_Y (ptr 3) | descending | same form as GRP_IN untransposed | -(C-1) | +C | once |
+| GRP_H (ptr 4) | descending | same | -(C-1) | +C | once |
+| GRP_G (ptr 5) grad-bias | broadcast | ptr + i (CONSTANT) | 1 | 0 | held whole walk |
+| GRP_G (ptr 6) grad-weight | descending | same form | -(C-1) | +C | once |
+
+Writes:
+
+| Channel | Lane-i address | Stride across lanes |
+|---|---|---|
+| [0,N) grad writeback (weights) | grad_descent_ptr + r*w + i | +1 (CONSECUTIVE) |
+| [0,N) grad writeback (biases) | grad_descent_ptr + i | +1 (CONSECUTIVE) |
+| [N,2N) VPU stream | stream_base + r*w + i | +1 (CONSECUTIVE) |
+| [N,2N) host load | wr_ptr++ (decrementing lane loop) | +1 (CONSECUTIVE) |
+
+### Structural findings
+
+F1. **Every per-cycle address set is an arithmetic progression across lanes.**
+    All read strides s in {0, ±(C-1), ±(C+1)}; all write strides are +1.
+    No random access anywhere in the design.
+
+F2. **Constant-address groups exist.** ptr-2 bias and ptr-5 grad-bias read the
+    same N words every cycle of their walk. They can be hoisted out of the
+    SRAM entirely: read once at walk start into N shadow registers, hold.
+    Removes 2 of 6 read groups from port pressure permanently.
+
+F3. **Skewed (mod-N) banking is conflict-free within a group at full width.**
+    Bank = addr mod N. At C = N the strides are N-1 == -1, N+1 == +1, 1 — all
+    coprime with N, so the N active lanes land in N DISTINCT banks. Writes
+    (stride 1) are always conflict-free.
+
+F4. **Partial-width walks can collide under plain mod-N banking.**
+    For C < N, stride C-1 (or C+1) collides when gcd(C-1, N) > 1 and the
+    active-lane span exceeds N/gcd (e.g. N=16, C=9: stride 8, lanes 0 and 2
+    both hit bank b). Mitigation options: XOR-fold swizzle
+    (bank = (addr ^ (addr >> log2N)) mod N — keeps stride-1 consecutive
+    writes conflict-free only if the fold is above the low bits... needs
+    care), address-offset swizzle per phase, or accepting a 1-cycle skid on
+    collision (changes timing — REJECTED, bit-exactness forbids). RESOLUTION
+    REQUIRED before RTL; verify the swizzle against every (R, C) pair the
+    gate suite exercises.
+
+F5. **Across-group bank collisions are the real port-budget question.**
+    Within one cycle, GRP_IN + GRP_W are both active every matmul cycle, and
+    during overlap windows stream writes + grad writeback + operand reads can
+    all fire (mid-phase next-operand reads, items 17a/18a). Mod-N banking
+    does NOT separate groups (regions are runtime-assigned pointers). The
+    maximum concurrent (group, bank) pressure per phase is UNKNOWN — this is
+    the next diagnostic (section 4).
+
+F6. **The mux forest is the fanout pathology.** Each of the 6N read ports is
+    a 512:1 x 16-bit mux whose select is the per-lane address; ABC merges
+    correlated selects across lanes into 4096-sink nets. A banked UB replaces
+    each 512:1 mux with N banks of DEPTH/N:1 muxes (32:1 at N=16, DEPTH=512)
+    — select fanout per net drops ~N-fold by construction, and no single net
+    spans lanes.
+
+## 3. Architecture candidates
+
+Constraints carried from the item-24 analysis: no 2NW/6NR sky130 macro
+exists; banking was previously rejected FOR SIM (cross-channel concurrency +
+even-stride conflicts — F4/F5 are exactly those concerns, now quantified);
+CLEAR_ON_RESET is behavioral-only (silicon needs a boot scrub — sequencer
+micro-routine or host writes; small state machine, does not affect steady
+state); bit/cycle-exactness vs the behavioral model is non-negotiable (the
+entire 67-target gate baseline compares against it).
+
+### (a) Banked 1RW/1R + port arbitration — REJECTED as stated
+Time-multiplexing ports inserts bubbles; bit-exactness forbids. Arbitration
+without bubbles = more physical ports, i.e. (e).
+
+### (b) Compiled latch/FF register-file macro — DEFERRED
+No RF compiler in sky130; a hand-built latch array is a custom-macro project
+of its own. Revisit if (e) misses area targets.
+
+### (c) Word-width folding (store N consecutive elements per wide word) —
+    REJECTED
+Read strides are C-dependent (runtime); only stride-1 accesses (writes, bias)
+are contiguous. Folding helps writes but breaks every descending/weight walk.
+
+### (d) Keep DFF-UB, kill CLEAR_ON_RESET + tree-buffer control nets — REJECTED
+    (insufficient)
+The 4096-sink monsters are ABC-merged mux selects (F6) — they don't exist in
+RTL and can't be buffered by construction. Post-synthesis buffering = repair
+= the hang. DFF-UB at N=16 is also ~18 mm2 / ~500k gates — unroutable even
+with perfect fanout hygiene.
+
+### (e) Skewed banked UB with replicated 1RW/1R banks — CANDIDATE
+- N banks, bank = swizzle(addr), DEPTH/N words of 16 bits each.
+- Each bank = K physical sky130 1rw1r replicas (write-all, read-any) giving
+  K+1 read and 2 write accesses per bank per cycle (RW port can carry the
+  2nd write). K sized by the F5 diagnostic; target K = 2 (matmul operand
+  pair) + slack.
+- Constant-address groups (F2) shadowed into N-entry register files at walk
+  start — GRP_B/GRP_GB leave the port budget.
+- Area at N=16, DEPTH=32768: 32768x16 bits x K replicas ~ K x 3.15M
+  transistors of macro — 2 replicas ~ 6.3M ~ 3.3x better than DFF-UB, and
+  ROUTABLE (hardened macros + std-cell glue only).
+- Timing: bank read = the same 1-cycle sync read as the behavioral macro;
+  address generation (walk math) is unchanged — the same arithmetic feeds
+  bank-select + in-bank address. Bit-exact by construction; the behavioral
+  sram_macro stays the sim golden under the non-SYNTH path.
+
+### Decision
+(e), pending the F4 swizzle resolution and the F5 concurrency diagnostic.
+
+## 4. Next diagnostics (before RTL)
+
+D1. **Per-phase group-concurrency measurement.** Instrument
+    `unified_buffer_nxn.sv` (ifdef'd $display of the active-group mask +
+    write-channel mask per cycle) and run the heaviest gate target
+    (adaln_n16 capstone). Reduce the log to: max concurrent read groups, max
+    concurrent (read+write) channels, and the joint histogram. Sets K.
+
+D2. **Collision census for candidate swizzles.** Python model of the walk
+    math (section 2 table) enumerated over every (R, C, transpose, ptr) the
+    gate suite + DiT programs use; for each candidate swizzle, count
+    within-group bank conflicts. Pick a swizzle with zero conflicts; if none
+    exists for plain schemes, restrict stride pathologies by UB layout
+    convention (pad odd strides at write time — changes ProgGen placement
+    only, not RTL timing).
+
+D3. **sky130 macro geometry at DEPTH/N.** 32768/16 = 2048 words x 16b =
+    4KB/bank; the existing 1kbyte macro x 4 stacked, or a 4KB ciel macro if
+    available. Bank pinout feeds the floorplan sketch.
+
+## 5. Execution plan (after D1-D3)
+
+1. `src/ub_banked.sv` + `src/sram_bank_1rw1r.sv` wrapper, under
+   `SYNTH_SRAM_MACROS` ifdef family alongside the item-24 prog_mem swap;
+   behavioral sram_macro stays the default sim model.
+2. Equivalence: new unit test `test/test_ub_banked.py` driving both UBs with
+   identical port stimulus (directed walks + randomized (R,C,transpose)),
+   comparing per-cycle outputs bit-exactly.
+3. Full gate baseline (67 targets) green on the SYNTH path.
+4. N=8 hardening run: must pass repair_design and route. Then N=16.
